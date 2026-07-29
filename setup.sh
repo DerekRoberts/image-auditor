@@ -24,6 +24,7 @@ cat << 'EOF' > "$BIN_PATH"
 #!/usr/bin/env bash
 TARGET_DIR="."
 FILTER_HOST_DIR=""
+IS_DRY_RUN=false
 ARGS=()
 
 skip_next=false
@@ -36,9 +37,14 @@ for ((i=1; i<=$#; i++)); do
     next_index=$((i+1))
     next_arg="${!next_index}"
 
-    if [ "$arg" == "--filter-dir" ]; then
+    if [ "$arg" == "--dry-run" ]; then
+        IS_DRY_RUN=true
+        ARGS+=("$arg")
+    elif [ "$arg" == "--filter-dir" ]; then
         FILTER_HOST_DIR="$next_arg"
         skip_next=true
+    elif [[ "$arg" == --filter-dir=* ]]; then
+        FILTER_HOST_DIR="${arg#*=}"
     elif [[ "$arg" != -* ]] && [ -d "$arg" ]; then
         TARGET_DIR="$arg"
     else
@@ -51,10 +57,14 @@ MOUNTS=("-v" "$REAL_HOST_DIR:/photos:z")
 
 CONTAINER_FLAGS=()
 if [ -n "$FILTER_HOST_DIR" ]; then
-    mkdir -p "$FILTER_HOST_DIR"
-    REAL_FILTER_DIR="$(realpath "$FILTER_HOST_DIR")"
-    MOUNTS+=("-v" "$REAL_FILTER_DIR:/filtered:z")
-    CONTAINER_FLAGS+=("--filter-dir" "/filtered")
+    if [ "$IS_DRY_RUN" = false ]; then
+        mkdir -p "$FILTER_HOST_DIR"
+    fi
+    if [ -d "$FILTER_HOST_DIR" ]; then
+        REAL_FILTER_DIR="$(realpath "$FILTER_HOST_DIR")"
+        MOUNTS+=("-v" "$REAL_FILTER_DIR:/filtered:z")
+        CONTAINER_FLAGS+=("--filter-dir" "/filtered")
+    fi
 fi
 
 CONTAINER_ENGINE="podman"

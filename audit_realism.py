@@ -97,7 +97,7 @@ def main():
                     shutil.move(str(img_path), str(filter_dir / img_path.name))
                     print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
                 else:
-                    print(f"  -> Preserved keeper in place")
+                    print("  -> Preserved keeper in place")
                 
         except Exception as e:
             print(f"Error parsing analysis output for {img_path.name}: {e}")
