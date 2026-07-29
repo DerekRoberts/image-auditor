@@ -15,9 +15,10 @@ class RealismAnalysis(BaseModel):
 def parse_args():
     parser = argparse.ArgumentParser(description="Audit and sort AI-generated images based on photorealism using Ollama.")
     parser.add_argument("--dir", default="./photos", help="Input directory containing images (.png, .jpg, .jpeg, .webp)")
+    parser.add_argument("--trash-dir", default=None, help="Directory to move rejected/junk files into (default: <input_dir>/rejects)")
     parser.add_argument("--model", default="llava", help="Local vision model to query via Ollama")
-    parser.add_argument("--threshold", type=float, default=7.0, help="Minimum floating point realism score (1.0 to 10.0) to move an image to keepers")
-    parser.add_argument("--dry-run", action="store_true", help="Generate the JSON report without physically moving files into keepers or rejects")
+    parser.add_argument("--threshold", type=float, default=7.0, help="Minimum floating point realism score (1.0 to 10.0) to keep image in-place")
+    parser.add_argument("--dry-run", action="store_true", help="Generate the JSON report without physically moving files into trash_dir")
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
     return parser.parse_args()
 
@@ -61,12 +62,10 @@ def main():
         print(f"Error: Directory '{input_dir}' does not exist.")
         return
 
-    keepers_dir = input_dir / "keepers"
-    rejects_dir = input_dir / "rejects"
+    trash_dir = Path(args.trash_dir) if args.trash_dir else input_dir / "rejects"
     
     if not args.dry_run:
-        keepers_dir.mkdir(parents=True, exist_ok=True)
-        rejects_dir.mkdir(parents=True, exist_ok=True)
+        trash_dir.mkdir(parents=True, exist_ok=True)
 
     supported_extensions = {".png", ".jpg", ".jpeg", ".webp"}
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in supported_extensions and p.is_file()]
@@ -93,8 +92,12 @@ def main():
             print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
             
             if not args.dry_run:
-                target_dir = keepers_dir if analysis.realism_score >= args.threshold else rejects_dir
-                shutil.move(str(img_path), str(target_dir / img_path.name))
+                # Keepers stay in place in input_dir; rejects get moved out to trash_dir
+                if analysis.realism_score < args.threshold:
+                    shutil.move(str(img_path), str(trash_dir / img_path.name))
+                    print(f"  -> Moved reject to {trash_dir / img_path.name}")
+                else:
+                    print(f"  -> Preserved keeper in place")
                 
         except Exception as e:
             print(f"Error parsing analysis output for {img_path.name}: {e}")
