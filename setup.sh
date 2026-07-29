@@ -23,7 +23,7 @@ mkdir -p "$BIN_DIR"
 cat << 'EOF' > "$BIN_PATH"
 #!/usr/bin/env bash
 TARGET_DIR="."
-TRASH_HOST_DIR=""
+FILTER_HOST_DIR=""
 ARGS=()
 
 skip_next=false
@@ -36,8 +36,8 @@ for ((i=1; i<=$#; i++)); do
     next_index=$((i+1))
     next_arg="${!next_index}"
 
-    if [ "$arg" == "--trash-dir" ]; then
-        TRASH_HOST_DIR="$next_arg"
+    if [ "$arg" == "--filter-dir" ]; then
+        FILTER_HOST_DIR="$next_arg"
         skip_next=true
     elif [[ "$arg" != -* ]] && [ -d "$arg" ]; then
         TARGET_DIR="$arg"
@@ -50,11 +50,11 @@ REAL_HOST_DIR="$(realpath "$TARGET_DIR")"
 MOUNTS=("-v" "$REAL_HOST_DIR:/photos:z")
 
 CONTAINER_FLAGS=()
-if [ -n "$TRASH_HOST_DIR" ]; then
-    mkdir -p "$TRASH_HOST_DIR"
-    REAL_TRASH_DIR="$(realpath "$TRASH_HOST_DIR")"
-    MOUNTS+=("-v" "$REAL_TRASH_DIR:/trash:z")
-    CONTAINER_FLAGS+=("--trash-dir" "/trash")
+if [ -n "$FILTER_HOST_DIR" ]; then
+    mkdir -p "$FILTER_HOST_DIR"
+    REAL_FILTER_DIR="$(realpath "$FILTER_HOST_DIR")"
+    MOUNTS+=("-v" "$REAL_FILTER_DIR:/filtered:z")
+    CONTAINER_FLAGS+=("--filter-dir" "/filtered")
 fi
 
 CONTAINER_ENGINE="podman"
@@ -75,5 +75,5 @@ echo " Setup complete!"
 echo " Executable binary installed to: $BIN_PATH"
 echo "=========================================================="
 echo " You can now run the auditor from anywhere using:"
-echo "   audit-realism ~/Downloads --trash-dir ~/Desktop/Trash --dry-run"
+echo "   audit-realism ~/Downloads --filter-dir ~/Desktop/Filtered_Photos --dry-run"
 echo ""

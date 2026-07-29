@@ -59,8 +59,9 @@ audit-realism ~/Downloads --model llava --threshold 8.0
 | Flag | Default | Description |
 | --- | --- | --- |
 | `directory` | `.` | Target input directory containing images (`.png`, `.jpg`, `.jpeg`, `.webp`) |
+| `--filter-dir` | `<input_dir>/rejects` | Directory to move filtered-out/rejected files into |
 | `--model` | `llava` | Local vision model to query via Ollama |
-| `--threshold` | `7.0` | Minimum score (1.0 to 10.0) required to move image to `keepers/` |
+| `--threshold` | `7.0` | Minimum score (1.0 to 10.0) required to keep image in-place |
 | `--dry-run` | `False` | Generate report without moving files |
 
 ---
