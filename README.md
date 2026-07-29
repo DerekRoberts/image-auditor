@@ -26,12 +26,12 @@ Evaluates image quality, detects AI generation artifacts (e.g. plastic skin, war
 Clone the repository and run the setup script:
 
 ```bash
-git clone https://github.com/<your-username>/image_auditor.git
-cd image_auditor
+git clone https://github.com/DerekRoberts/image-auditor.git
+cd image-auditor
 ./setup.sh
 ```
 
-The `./setup.sh` script builds the container image and installs the standalone `audit-realism` binary wrapper into `~/.local/bin/audit-realism`.
+The `./setup.sh` script builds the container image and installs the standalone `image-auditor` binary wrapper into `~/.local/bin/image-auditor`.
 
 ---
 
@@ -39,17 +39,17 @@ The `./setup.sh` script builds the container image and installs the standalone `
 
 ### Run from anywhere
 ```bash
-audit-realism ~/Downloads --threshold 7.5
+image-auditor ~/Downloads --threshold 7.5
 ```
 
 ### Dry-run (JSON report only, no file movements)
 ```bash
-audit-realism ~/Downloads --dry-run
+image-auditor ~/Downloads --dry-run
 ```
 
 ### Specify custom vision model
 ```bash
-audit-realism ~/Downloads --model llava --threshold 8.0
+image-auditor ~/Downloads --model llava --threshold 8.0
 ```
 
 ---

@@ -3,7 +3,7 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
-BIN_PATH="$BIN_DIR/audit-realism"
+BIN_PATH="$BIN_DIR/image-auditor"
 
 echo "==> Building container image 'image-auditor:latest'..."
 if command -v podman >/dev/null 2>&1; then
