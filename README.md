@@ -1,8 +1,8 @@
-# AI Image Realism Auditor & Sorter
+# Image Auditor
 
-A local CLI tool for auditing and sorting AI-generated images based on photorealism using local vision LLMs via [Ollama](https://ollama.com).
+A local CLI tool for auditing, deduplicating, and sorting photo collections and AI generations using local vision LLMs via [Ollama](https://ollama.com).
 
-Evaluates image quality, detects AI generation artifacts (e.g. plastic skin, warped fingers, lighting inconsistencies), scores photorealism from 1.0 to 10.0, and automatically sorts files into `keepers/` or `rejects/` folders based on a configurable threshold.
+Evaluates image quality, detects generation artifacts and defects (e.g. plastic skin, warped fingers, lighting errors), scores quality from 1.0 to 10.0, and automatically filters unwanted photos into a target directory while preserving keepers in-place.
 
 ---
 
