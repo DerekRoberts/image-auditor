@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import shutil
 from pathlib import Path
 from pydantic import BaseModel
@@ -33,9 +32,9 @@ def ensure_model(model_name: str):
             ollama.pull(model_name)
             print(f"Successfully pulled '{model_name}'.")
         else:
-            print(f"Warning: Failed to check model '{model_name}': {e}")
+            raise SystemExit(f"Error: Ollama returned status {e.status_code} for model '{model_name}': {e}")
     except Exception as e:
-        print(f"Warning: Failed to check or pull model '{model_name}': {e}")
+        raise SystemExit(f"Error: Cannot reach Ollama. Is 'ollama serve' running? {e}")
 
 def analyze_image(img_path: Path, model_name: str) -> dict:
     response = ollama.chat(
@@ -103,14 +102,16 @@ def main():
             print(f"Error parsing analysis output for {img_path.name}: {e}")
 
     results.sort(key=lambda x: x["analysis"]["realism_score"], reverse=True)
-    
-    report_path = input_dir / "realism_audit_report.json"
-    with open(report_path, "w") as f:
-        json.dump(results, f, indent=2)
-        
-    display_report_path = args.report_path_display or str(report_path)
-    print(f"\nAudit complete! Processed {len(image_paths)} images.")
-    print(f"Report saved to {display_report_path}")
+
+    if results:
+        report_path = input_dir / "realism_audit_report.json"
+        with open(report_path, "w") as f:
+            json.dump(results, f, indent=2)
+        display_report_path = args.report_path_display or str(report_path)
+        print(f"\nAudit complete! Processed {len(image_paths)} images.")
+        print(f"Report saved to {display_report_path}")
+    else:
+        print(f"\nNo images were successfully processed out of {len(image_paths)} found.")
 
 if __name__ == "__main__":
     main()

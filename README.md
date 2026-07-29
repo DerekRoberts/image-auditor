@@ -10,7 +10,7 @@ Evaluates image quality, detects generation artifacts and defects (e.g. plastic 
 
 - **Local & Private:** Queries local vision models (`llava`, `llama3.2-vision`, `qwen2.5-vl`) running via Ollama — zero cloud API costs or data leakage.
 - **Structured Pydantic Output:** Enforces JSON schema validation for reliable numerical scores, boolean flags, artifact tags, and forensic reasoning.
-- **Automated Image Sorting:** Automatically segregates images into `<input_dir>/keepers` or `<input_dir>/rejects`.
+- **Automated Image Sorting:** Preserves quality images in-place and moves filtered files to `--filter-dir`.
 - **Dry-Run Mode:** Generate diagnostic JSON reports without moving any image files.
 - **Containerized CLI:** Pre-packaged wrapper for Podman / Docker to run like a native binary from anywhere on your system.
 
