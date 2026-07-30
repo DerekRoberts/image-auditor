@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -5,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +19,20 @@ SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "realism_audit_report.json"
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
+
+
+class ScanProgress:
+    """Thread-safe [n/total] prefix for parallel full scans."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self._lock = threading.Lock()
+        self._next = 0
+
+    def begin(self) -> str:
+        with self._lock:
+            self._next += 1
+            return f"[{self._next}/{self.total}]"
 
 
 class RealismAnalysis(BaseModel):
@@ -238,19 +255,23 @@ def process_image(
     fast: bool,
     print_lock: threading.Lock,
     move_lock: threading.Lock,
+    progress: ScanProgress | None = None,
 ) -> dict:
+    tag = f"{progress.begin()} " if progress else ""
+
     with print_lock:
-        print(f"Analyzing {img_path.name}...")
+        print(f"{tag}Analyzing {img_path.name}...")
     try:
         analysis_dict = analyze_image(img_path, model_name, max_dimension, fast)
         analysis = RealismAnalysis(**analysis_dict)
     except Exception as e:
         with print_lock:
-            print(f"Error processing {img_path.name}: {e}")
+            traceback.print_exc()
+            print(f"{tag}Error processing {img_path.name}: {e}")
         return {"file": img_path.name, "status": "error", "error": str(e)}
 
     with print_lock:
-        print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+        print(f"{tag}  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
 
     result = {"file": img_path.name, "analysis": analysis_dict}
 
@@ -259,14 +280,14 @@ def process_image(
             try:
                 dest = move_reject(img_path, filter_dir, move_lock)
                 with print_lock:
-                    print(f"  -> Moved filtered image to {dest}")
+                    print(f"{tag}  -> Moved filtered image to {dest}")
             except OSError as e:
                 with print_lock:
-                    print(f"  -> Error moving {img_path.name}: {e}")
+                    print(f"{tag}  -> Error moving {img_path.name}: {e}")
                 result["move_error"] = str(e)
         else:
             with print_lock:
-                print("  -> Preserved keeper in place")
+                print(f"{tag}  -> Preserved keeper in place")
 
     return result
 
@@ -313,6 +334,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
     depth = pipeline_depth(len(image_paths))
     print_lock = threading.Lock()
     move_lock = threading.Lock()
+    progress = ScanProgress(len(image_paths)) if image_paths else None
 
     def process(img_path: Path) -> dict:
         return process_image(
@@ -325,6 +347,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
             args.fast,
             print_lock,
             move_lock,
+            progress,
         )
 
     with ThreadPoolExecutor(max_workers=depth) as executor:
@@ -392,6 +415,105 @@ def _self_check():
         (rejects / "a.jpg").write_text("old")
         assert unique_reject_path(rejects, "a.jpg") == rejects / "a_2.jpg"
         assert unique_reject_path(rejects, "b.jpg") == rejects / "b.jpg"
+    p = ScanProgress(3)
+    assert p.begin() == "[1/3]"
+    assert p.begin() == "[2/3]"
+    seen = []
+
+    def _grab():
+        seen.append(p.begin())
+
+    threads = [threading.Thread(target=_grab) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(seen) == 8 and len(set(seen)) == 8
+    _check_process_image_error_handling()
+    _check_run_audit_progress_tags()
+
+
+def _check_process_image_error_handling():
+    import io
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        img = Path(tmp) / "x.jpg"
+        img.write_bytes(b"x")
+        err = io.StringIO()
+        out = io.StringIO()
+        with patch.object(mod, "analyze_image", side_effect=RuntimeError("unexpected")), redirect_stderr(err), redirect_stdout(out):
+            result = process_image(
+                img, "llava", 7.0, True, Path(tmp) / "rejects", 0, False,
+                threading.Lock(), threading.Lock(), ScanProgress(2),
+            )
+        assert result == {"file": "x.jpg", "status": "error", "error": "unexpected"}
+        assert "Traceback" in err.getvalue()
+        assert "RuntimeError: unexpected" in err.getvalue()
+        assert "[1/2] Error processing x.jpg: unexpected" in out.getvalue()
+
+
+def _check_run_audit_progress_tags():
+    import io
+    import re
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        input_dir = Path(tmp) / "photos"
+        filter_dir = Path(tmp) / "rejects"
+        input_dir.mkdir()
+        for name in ("good.jpg", "bad.jpg", "fail.jpg"):
+            (input_dir / name).write_bytes(b"x")
+
+        def mock_analyze(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+            if img_path.name == "fail.jpg":
+                raise RuntimeError("boom")
+            score = 5.0 if img_path.name == "bad.jpg" else 8.0
+            return {
+                "realism_score": score,
+                "is_realistic": score >= 7.0,
+                "detected_artifacts": [],
+                "reasoning": "test",
+            }
+
+        args = argparse.Namespace(
+            model="llava",
+            threshold=7.0,
+            dry_run=False,
+            max_dimension=0,
+            fast=False,
+            report_path_display=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_image", side_effect=mock_analyze), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            run_audit(args, input_dir, filter_dir)
+
+        out = captured.getvalue()
+        analyzing_tags = re.findall(r"(\[\d+/3\]) Analyzing (\S+?)\.\.\.", out)
+        assert len(analyzing_tags) == 3
+        assert len({tag for tag, _ in analyzing_tags}) == 3
+
+        by_tag = {tag: fname for tag, fname in analyzing_tags}
+        for tag, fname in by_tag.items():
+            tag_lines = [line for line in out.splitlines() if line.startswith(tag)]
+            if fname == "fail.jpg":
+                assert any("Error processing fail.jpg" in line for line in tag_lines)
+            else:
+                assert any("Score:" in line for line in tag_lines)
+            if fname == "bad.jpg":
+                assert any("Moved filtered image" in line for line in tag_lines)
+            elif fname == "good.jpg":
+                assert any("Preserved keeper" in line for line in tag_lines)
+
+        _, results = load_report(input_dir / DEFAULT_REPORT_NAME)
+        assert len(results) == 3
+        assert sum(entry.get("status") == "error" for entry in results) == 1
 
 
 def main():
