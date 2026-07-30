@@ -19,6 +19,8 @@ SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "realism_audit_report.json"
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
+DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
+SCORED_DIMENSIONS = ("ai", "quality", "generation")
 
 
 class ScanProgress:
@@ -46,6 +48,132 @@ class RealismAnalysisFast(BaseModel):
     realism_score: float
     is_realistic: bool
     detected_artifacts: list[str]
+
+
+class HygieneVerdict(BaseModel):
+    action: str
+    exact_dupe_of: str | None = None
+
+
+class AiVerdict(BaseModel):
+    realism_score: float
+    is_realistic: bool | None = None
+    issues: list[str] = []
+    reasoning: str = ""
+
+
+class QualityVerdict(BaseModel):
+    keeper_score: float
+    issues: list[str] = []
+    reasoning: str = ""
+
+
+class GenerationVerdict(BaseModel):
+    success_score: float
+    issues: list[str] = []
+    reasoning: str = ""
+
+
+def default_thresholds(threshold: float) -> dict[str, float | None]:
+    return {"ai": threshold, "quality": None, "generation": None}
+
+
+def effective_thresholds(meta: dict | None, cli_threshold: float) -> dict[str, float | None]:
+    if meta and "thresholds" in meta:
+        thresholds = dict(meta["thresholds"])
+        if thresholds.get("ai") is None:
+            legacy = meta.get("threshold")
+            if legacy is not None:
+                thresholds["ai"] = legacy
+        return thresholds
+    legacy = (meta or {}).get("threshold", cli_threshold)
+    return default_thresholds(legacy)
+
+
+def multi_dimensional_active(thresholds: dict[str, float | None]) -> bool:
+    return sum(v is not None for v in thresholds.values()) > 1
+
+
+def analysis_to_ai_block(analysis: dict) -> dict:
+    return {
+        "realism_score": analysis["realism_score"],
+        "is_realistic": analysis.get("is_realistic"),
+        "issues": analysis.get("detected_artifacts", []),
+        "reasoning": analysis.get("reasoning", ""),
+    }
+
+
+def dimension_score(entry: dict, dimension: str) -> float | None:
+    block = entry.get(dimension)
+    if not block:
+        return None
+    if dimension == "ai":
+        return block.get("realism_score")
+    if dimension == "quality":
+        return block.get("keeper_score")
+    if dimension == "generation":
+        return block.get("success_score")
+    return None
+
+
+def legacy_analysis_score(entry: dict) -> float | None:
+    analysis = entry.get("analysis")
+    if analysis and "realism_score" in analysis:
+        return analysis["realism_score"]
+    return dimension_score(entry, "ai")
+
+
+def build_report_meta(
+    *,
+    threshold: float,
+    model: str,
+    max_dimension: int,
+    fast: bool,
+    dry_run: bool,
+    profile: str | None = None,
+    thresholds: dict[str, float | None] | None = None,
+) -> dict:
+    meta = {
+        "threshold": threshold,
+        "thresholds": thresholds or default_thresholds(threshold),
+        "model": model,
+        "max_dimension": max_dimension,
+        "fast": fast,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dry_run": dry_run,
+    }
+    if profile is not None:
+        meta["profile"] = profile
+    return meta
+
+
+def result_entry_from_lenses(
+    filename: str,
+    *,
+    hygiene: dict | None = None,
+    ai: dict | None = None,
+    quality: dict | None = None,
+    generation: dict | None = None,
+    keep: bool | None = None,
+) -> dict:
+    entry: dict = {"file": filename}
+    for key, block in (
+        ("hygiene", hygiene),
+        ("ai", ai),
+        ("quality", quality),
+        ("generation", generation),
+    ):
+        if block is not None:
+            entry[key] = block
+    if keep is not None:
+        entry["keep"] = keep
+    return entry
+
+
+def realism_result_entry(filename: str, analysis: dict, *, multi_dimensional: bool = False) -> dict:
+    if multi_dimensional:
+        return result_entry_from_lenses(filename, ai=analysis_to_ai_block(analysis))
+    return {"file": filename, "analysis": analysis}
 
 
 def parse_args():
@@ -115,8 +243,11 @@ def write_report(path: Path, meta: dict, results: list):
 
 
 def score_sort_key(entry: dict) -> tuple[float, str]:
-    analysis = entry.get("analysis")
-    score = analysis["realism_score"] if analysis and "realism_score" in analysis else -1.0
+    scores = [s for dim in SCORED_DIMENSIONS if (s := dimension_score(entry, dim)) is not None]
+    legacy = legacy_analysis_score(entry)
+    if legacy is not None:
+        scores.append(legacy)
+    score = max(scores) if scores else -1.0
     return (-score, entry.get("file", ""))
 
 
@@ -124,7 +255,7 @@ def pipeline_depth(image_count: int) -> int:
     return max(1, min(image_count, MAX_IN_FLIGHT))
 
 
-def should_reject(entry: dict, threshold: float) -> bool | None:
+def should_reject(entry: dict, threshold: float, meta: dict | None = None) -> bool | None:
     keep = entry.get("keep")
     if keep is True:
         return False
@@ -132,7 +263,22 @@ def should_reject(entry: dict, threshold: float) -> bool | None:
         return True
     if entry.get("status") == "error":
         return None
-    return entry["analysis"]["realism_score"] < threshold
+
+    hygiene = entry.get("hygiene")
+    if hygiene:
+        action = hygiene.get("action")
+        if action == "reject":
+            return True
+        if action == "keep":
+            return False
+
+    score = legacy_analysis_score(entry)
+    if score is None:
+        return None
+    ai_threshold = effective_thresholds(meta, threshold)["ai"]
+    if ai_threshold is None:
+        return None
+    return score < ai_threshold
 
 
 def unique_reject_path(filter_dir: Path, filename: str) -> Path:
@@ -161,12 +307,12 @@ def move_reject(img_path: Path, filter_dir: Path, move_lock: threading.Lock | No
 
 
 def apply_from_report(report_path: Path, input_dir: Path, filter_dir: Path, threshold: float):
-    _, results = load_report(report_path)
+    meta, results = load_report(report_path)
     moved = kept = skipped = 0
 
     for entry in results:
         filename = entry["file"]
-        reject = should_reject(entry, threshold)
+        reject = should_reject(entry, threshold, meta)
         if reject is None:
             print(f"Skipping {filename}: error entry without keep override")
             skipped += 1
@@ -273,7 +419,7 @@ def process_image(
     with print_lock:
         print(f"{tag}  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
 
-    result = {"file": img_path.name, "analysis": analysis_dict}
+    result = realism_result_entry(img_path.name, analysis_dict)
 
     if not dry_run:
         if should_reject(result, threshold):
@@ -357,14 +503,13 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
 
     if results:
         report_path = input_dir / DEFAULT_REPORT_NAME
-        meta = {
-            "threshold": args.threshold,
-            "model": args.model,
-            "max_dimension": args.max_dimension,
-            "fast": args.fast,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "dry_run": args.dry_run,
-        }
+        meta = build_report_meta(
+            threshold=args.threshold,
+            model=args.model,
+            max_dimension=args.max_dimension,
+            fast=args.fast,
+            dry_run=args.dry_run,
+        )
         write_report(report_path, meta, results)
         display_report_path = args.report_path_display or str(report_path)
         print(f"\nAudit complete! {len(results)} of {len(image_paths)} images in report.")
@@ -380,6 +525,34 @@ def _self_check():
     assert should_reject({"file": "d.jpg", "analysis": {"realism_score": 8.0}}, 7.0) is False
     assert should_reject({"file": "e.jpg", "status": "error", "error": "boom"}, 7.0) is None
     assert should_reject({"file": "f.jpg", "status": "error", "error": "boom", "keep": False}, 7.0) is True
+    assert should_reject({"file": "g.jpg", "hygiene": {"action": "reject", "exact_dupe_of": "orig.jpg"}}, 7.0) is True
+    assert should_reject({"file": "h.jpg", "hygiene": {"action": "keep"}}, 7.0) is False
+    assert should_reject(
+        {"file": "i.jpg", "ai": {"realism_score": 6.0, "issues": [], "reasoning": ""}},
+        7.0,
+    ) is True
+    assert should_reject(
+        {"file": "j.jpg", "ai": {"realism_score": 8.0, "issues": [], "reasoning": ""}},
+        7.0,
+        {"thresholds": {"ai": 7.0, "quality": None, "generation": None}},
+    ) is False
+    assert should_reject({"file": "k.jpg", "quality": {"keeper_score": 3.0, "issues": []}}, 7.0) is None
+    assert effective_thresholds({"threshold": 8.0, "thresholds": {"ai": None, "quality": 6.0, "generation": None}}, 7.0)["ai"] == 8.0
+    assert multi_dimensional_active({"ai": 7.0, "quality": 6.0, "generation": None}) is True
+    assert multi_dimensional_active({"ai": 7.0, "quality": None, "generation": None}) is False
+    ai_block = analysis_to_ai_block(
+        {"realism_score": 8.0, "is_realistic": True, "detected_artifacts": ["x"], "reasoning": "ok"}
+    )
+    assert ai_block["issues"] == ["x"] and ai_block["realism_score"] == 8.0
+    legacy_entry = realism_result_entry("a.jpg", {"realism_score": 5.0, "is_realistic": False, "detected_artifacts": [], "reasoning": ""})
+    assert "analysis" in legacy_entry and "ai" not in legacy_entry
+    multi_entry = realism_result_entry(
+        "b.jpg",
+        {"realism_score": 5.0, "is_realistic": False, "detected_artifacts": [], "reasoning": ""},
+        multi_dimensional=True,
+    )
+    assert "ai" in multi_entry and "analysis" not in multi_entry
+    assert score_sort_key({"file": "z.jpg", "quality": {"keeper_score": 9.0}})[0] == -9.0
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         json.dump([{"file": "x.jpg", "analysis": {"realism_score": 5.0}}], f)

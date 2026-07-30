@@ -112,10 +112,15 @@ If you do enable it, dry-run both ways on a sample folder and compare scores bef
 
 ## Sample JSON Audit Report (`realism_audit_report.json`)
 
+### Single-score mode (default)
+
+Current audits emit one `analysis` block per file plus legacy `meta.threshold`. New reports also record `meta.thresholds` for forward compatibility with profiles.
+
 ```json
 {
   "meta": {
     "threshold": 7.0,
+    "thresholds": { "ai": 7.0, "quality": null, "generation": null },
     "model": "llava",
     "max_dimension": 0,
     "fast": false,
@@ -146,6 +151,57 @@ If you do enable it, dry-run both ways on a sample folder and compare scores bef
 ```
 
 Each result may include an optional `keep` field (`true` = never move, `false` = always move). Failed entries require `keep` before apply will move them. Legacy bare-array reports are still accepted on read.
+
+### Multi-dimensional layout (profiles)
+
+When multiple audit lenses are active (future `--profile` support), each result carries **only the populated dimension blocks** — no empty placeholders. `meta.profile` names the active profile; `meta.thresholds` holds per-dimension cutoffs (`null` = lens inactive).
+
+| Block | Purpose | Key fields |
+| --- | --- | --- |
+| `hygiene` | Deterministic pre-filter (#2, #3): dupes, corruption, min-res | `action` (`reject` \| `keep`), optional `exact_dupe_of` |
+| `ai` | Photorealism / AI-artifact detection | `realism_score`, `issues[]`, `reasoning` |
+| `quality` | Real-photo keeper scoring (blur, exposure, framing) | `keeper_score`, `issues[]`, `reasoning` |
+| `generation` | AI-art success (subject landed, not melted) | `success_score`, `issues[]`, `reasoning` |
+
+```json
+{
+  "meta": {
+    "profile": "ai-fun",
+    "thresholds": { "ai": null, "quality": 6.0, "generation": 7.0 },
+    "generated_at": "2026-07-29T12:00:00+00:00",
+    "dry_run": true
+  },
+  "results": [
+    {
+      "file": "octo-rex.png",
+      "generation": {
+        "success_score": 8.5,
+        "issues": [],
+        "reasoning": "Creative mashup, coherent subjects, no garbled anatomy."
+      },
+      "keep": null
+    },
+    {
+      "file": "IMG_blur.jpg",
+      "quality": {
+        "keeper_score": 3.2,
+        "issues": ["motion_blur", "underexposed"],
+        "reasoning": "Subject motion blur and heavy underexposure."
+      },
+      "keep": null
+    },
+    {
+      "file": "copy.jpg",
+      "hygiene": {
+        "exact_dupe_of": "original.jpg",
+        "action": "reject"
+      }
+    }
+  ]
+}
+```
+
+**Backward compatibility:** reports with top-level `analysis` / `realism_score` still load and apply using `meta.threshold` (or `meta.thresholds.ai`). Multi-dimensional `ai` blocks use the same score semantics without the legacy `analysis` wrapper. Composite reject policy across multiple scored lenses is defined in a follow-up issue; until then, `--apply-report` uses the AI/realism threshold for scored entries and honors `hygiene.action` plus `keep` overrides.
 
 ---
 
