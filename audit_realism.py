@@ -172,16 +172,17 @@ def scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int,
     if long_edge <= max_dimension:
         return None
     scale = max_dimension / long_edge
-    return round(width * scale), round(height * scale)
+    return max(1, round(width * scale)), max(1, round(height * scale))
 
 
 def prepare_analysis_image(img_path: Path, max_dimension: int) -> tuple[Path, Path | None]:
     """Return (path for Ollama, temp file to delete after analysis, or None)."""
     if max_dimension <= 0:
         return img_path, None
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     with Image.open(img_path) as img:
+        img = ImageOps.exif_transpose(img)
         new_size = scaled_dimensions(*img.size, max_dimension)
         if new_size is None:
             return img_path, None
@@ -189,10 +190,14 @@ def prepare_analysis_image(img_path: Path, max_dimension: int) -> tuple[Path, Pa
         fd, temp_name = tempfile.mkstemp(suffix=img_path.suffix.lower())
         os.close(fd)
         temp_path = Path(temp_name)
-        save_kwargs = {}
-        if img_path.suffix.lower() in (".jpg", ".jpeg"):
-            save_kwargs["quality"] = 95
-        resized.save(temp_path, **save_kwargs)
+        try:
+            save_kwargs = {}
+            if img_path.suffix.lower() in (".jpg", ".jpeg"):
+                save_kwargs["quality"] = 95
+            resized.save(temp_path, **save_kwargs)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
         return temp_path, temp_path
 
 
@@ -335,6 +340,8 @@ def _self_check():
     assert scaled_dimensions(100, 50, 200) is None
     assert scaled_dimensions(2000, 1000, 1024) == (1024, 512)
     assert scaled_dimensions(1000, 2000, 1024) == (512, 1024)
+    assert scaled_dimensions(1, 2, 1) == (1, 1)
+    assert scaled_dimensions(2, 1, 1) == (1, 1)
     from PIL import Image
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "big.png"
