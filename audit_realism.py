@@ -2,6 +2,8 @@ import argparse
 import json
 import math
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from pydantic import BaseModel
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "realism_audit_report.json"
+MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
 
 
 class RealismAnalysis(BaseModel):
@@ -72,11 +75,14 @@ def write_report(path: Path, meta: dict, results: list):
         json.dump({"meta": meta, "results": results}, f, indent=2)
 
 
-def score_sort_key(entry: dict) -> float:
+def score_sort_key(entry: dict) -> tuple[float, str]:
     analysis = entry.get("analysis")
-    if analysis and "realism_score" in analysis:
-        return analysis["realism_score"]
-    return -1.0
+    score = analysis["realism_score"] if analysis and "realism_score" in analysis else -1.0
+    return (-score, entry.get("file", ""))
+
+
+def pipeline_depth(image_count: int) -> int:
+    return max(1, min(image_count, MAX_IN_FLIGHT))
 
 
 def should_reject(entry: dict, threshold: float) -> bool | None:
@@ -90,9 +96,29 @@ def should_reject(entry: dict, threshold: float) -> bool | None:
     return entry["analysis"]["realism_score"] < threshold
 
 
-def move_reject(img_path: Path, filter_dir: Path):
-    filter_dir.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(img_path), str(filter_dir / img_path.name))
+def unique_reject_path(filter_dir: Path, filename: str) -> Path:
+    dest = filter_dir / filename
+    if not dest.exists():
+        return dest
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    n = 2
+    while (candidate := filter_dir / f"{stem}_{n}{suffix}").exists():
+        n += 1
+    return candidate
+
+
+def move_reject(img_path: Path, filter_dir: Path, move_lock: threading.Lock | None = None) -> Path:
+    def _move() -> Path:
+        filter_dir.mkdir(parents=True, exist_ok=True)
+        dest = unique_reject_path(filter_dir, img_path.name)
+        shutil.move(str(img_path), str(dest))
+        return dest
+
+    if move_lock is None:
+        return _move()
+    with move_lock:
+        return _move()
 
 
 def apply_from_report(report_path: Path, input_dir: Path, filter_dir: Path, threshold: float):
@@ -115,8 +141,8 @@ def apply_from_report(report_path: Path, input_dir: Path, filter_dir: Path, thre
 
         if reject:
             try:
-                move_reject(src, filter_dir)
-                print(f"  -> Moved filtered image to {filter_dir / filename}")
+                dest = move_reject(src, filter_dir)
+                print(f"  -> Moved filtered image to {dest}")
                 moved += 1
             except OSError as e:
                 print(f"  -> Error moving {filename}: {e}")
@@ -144,6 +170,47 @@ def ensure_model(model_name: str):
         raise SystemExit(f"Error: Cannot reach Ollama. Is 'ollama serve' running? {e}")
 
 
+def process_image(
+    img_path: Path,
+    model_name: str,
+    threshold: float,
+    dry_run: bool,
+    filter_dir: Path,
+    print_lock: threading.Lock,
+    move_lock: threading.Lock,
+) -> dict:
+    with print_lock:
+        print(f"Analyzing {img_path.name}...")
+    try:
+        analysis_dict = analyze_image(img_path, model_name)
+        analysis = RealismAnalysis(**analysis_dict)
+    except Exception as e:
+        with print_lock:
+            print(f"Error processing {img_path.name}: {e}")
+        return {"file": img_path.name, "status": "error", "error": str(e)}
+
+    with print_lock:
+        print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+
+    result = {"file": img_path.name, "analysis": analysis_dict}
+
+    if not dry_run:
+        if should_reject(result, threshold):
+            try:
+                dest = move_reject(img_path, filter_dir, move_lock)
+                with print_lock:
+                    print(f"  -> Moved filtered image to {dest}")
+            except OSError as e:
+                with print_lock:
+                    print(f"  -> Error moving {img_path.name}: {e}")
+                result["move_error"] = str(e)
+        else:
+            with print_lock:
+                print("  -> Preserved keeper in place")
+
+    return result
+
+
 def analyze_image(img_path: Path, model_name: str) -> dict:
     response = ollama.chat(
         model=model_name,
@@ -162,36 +229,19 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
     ensure_model(args.model)
 
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()]
-    results = []
+    depth = pipeline_depth(len(image_paths))
+    print_lock = threading.Lock()
+    move_lock = threading.Lock()
 
-    for img_path in image_paths:
-        print(f"Analyzing {img_path.name}...")
-        try:
-            analysis_dict = analyze_image(img_path, args.model)
-            analysis = RealismAnalysis(**analysis_dict)
-        except Exception as e:
-            print(f"Error processing {img_path.name}: {e}")
-            results.append({"file": img_path.name, "status": "error", "error": str(e)})
-            continue
+    def process(img_path: Path) -> dict:
+        return process_image(
+            img_path, args.model, args.threshold, args.dry_run, filter_dir, print_lock, move_lock
+        )
 
-        print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+    with ThreadPoolExecutor(max_workers=depth) as executor:
+        results = list(executor.map(process, image_paths))
 
-        result = {"file": img_path.name, "analysis": analysis_dict}
-
-        if not args.dry_run:
-            if should_reject(result, args.threshold):
-                try:
-                    move_reject(img_path, filter_dir)
-                    print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
-                except OSError as e:
-                    print(f"  -> Error moving {img_path.name}: {e}")
-                    continue
-            else:
-                print("  -> Preserved keeper in place")
-
-        results.append(result)
-
-    results.sort(key=score_sort_key, reverse=True)
+    results.sort(key=score_sort_key)
 
     if results:
         report_path = input_dir / DEFAULT_REPORT_NAME
@@ -222,6 +272,15 @@ def _self_check():
         f.flush()
         meta, results = load_report(Path(f.name))
     assert meta is None and results[0]["file"] == "x.jpg"
+    assert pipeline_depth(0) == 1
+    assert pipeline_depth(3) == 3
+    assert pipeline_depth(100) == MAX_IN_FLIGHT
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        rejects = Path(tmp)
+        (rejects / "a.jpg").write_text("old")
+        assert unique_reject_path(rejects, "a.jpg") == rejects / "a_2.jpg"
+        assert unique_reject_path(rejects, "b.jpg") == rejects / "b.jpg"
 
 
 def main():
