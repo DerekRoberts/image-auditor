@@ -70,6 +70,22 @@ image-auditor ~/Downloads --model llava --threshold 8.0
 | `--threshold` | `7.0` (dry-run only) | Minimum score (1.0 to 10.0) required to keep image in-place; **required** when not using `--dry-run` |
 | `--dry-run` | `False` | Generate report without moving files |
 | `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
+| `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
+
+### Speed vs accuracy (`--max-dimension`)
+
+**Off by default.** Omit the flag (or pass `--max-dimension 0`) to send full-resolution originals — same behavior as before this option existed.
+
+Opt in only when you've measured a speed win on large files and accept the accuracy tradeoffs below. Vision models typically downsample internally (~336–1024 px on the long edge), so `--max-dimension 1024` may shave ~10–30% off 4K+ images with little change for obvious rejects/keepers.
+
+**When not to use this:**
+
+- First pass on a new collection — start at full res until you know where scores land.
+- Borderline keepers (roughly threshold ± 1.0) — micro-artifacts (teeth, fingers, hair, small text) may disappear and inflate scores.
+- Already-small or upscaled AI images — further downscaling removes the detail that reveals fakeness.
+- When JPEG re-encode noise could matter — downscaling re-encodes JPEGs and can add blockiness that looks “AI.”
+
+If you do enable it, dry-run both ways on a sample folder and compare scores before trusting moves. Re-check any borderline keepers at full resolution.
 
 ---
 
