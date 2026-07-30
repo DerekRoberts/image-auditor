@@ -25,6 +25,12 @@ class RealismAnalysis(BaseModel):
     reasoning: str
 
 
+class RealismAnalysisFast(BaseModel):
+    realism_score: float
+    is_realistic: bool
+    detected_artifacts: list[str]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Audit and sort AI-generated images based on photorealism using Ollama.")
     parser.add_argument("--dir", default="./photos", help="Input directory containing images (.png, .jpg, .jpeg, .webp)")
@@ -52,6 +58,11 @@ def parse_args():
         default=0,
         metavar="N",
         help="Optional downscale before Ollama: long edge at most N px (0 = disabled, default)",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Minimal VLM output (score, flag, artifacts only) for faster bulk triage",
     )
     args = parser.parse_args()
 
@@ -224,13 +235,14 @@ def process_image(
     dry_run: bool,
     filter_dir: Path,
     max_dimension: int,
+    fast: bool,
     print_lock: threading.Lock,
     move_lock: threading.Lock,
 ) -> dict:
     with print_lock:
         print(f"Analyzing {img_path.name}...")
     try:
-        analysis_dict = analyze_image(img_path, model_name, max_dimension)
+        analysis_dict = analyze_image(img_path, model_name, max_dimension, fast)
         analysis = RealismAnalysis(**analysis_dict)
     except Exception as e:
         with print_lock:
@@ -259,20 +271,36 @@ def process_image(
     return result
 
 
-def analyze_image(img_path: Path, model_name: str, max_dimension: int = 0) -> dict:
+def analyze_image(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
     send_path, temp_path = prepare_analysis_image(img_path, max_dimension)
+    if fast:
+        prompt = (
+            "Analyze this image for photorealism. Return realism_score (1.0-10.0), "
+            "is_realistic, and detected_artifacts only. Do not explain."
+        )
+        schema = RealismAnalysisFast.model_json_schema()
+    else:
+        prompt = (
+            "Analyze this image for photorealism. Identify if it is realistic, rate it from 1.0 to 10.0, "
+            "list any AI-generated artifacts, and explain your reasoning."
+        )
+        schema = RealismAnalysis.model_json_schema()
     try:
         response = ollama.chat(
             model=model_name,
             messages=[{
                 "role": "user",
-                "content": "Analyze this image for photorealism. Identify if it is realistic, rate it from 1.0 to 10.0, list any AI-generated artifacts, and explain your reasoning.",
+                "content": prompt,
                 "images": [str(send_path)]
             }],
-            format=RealismAnalysis.model_json_schema(),
+            format=schema,
             options={"temperature": 0}
         )
-        return json.loads(response.message.content)
+        result = json.loads(response.message.content)
+        if fast:
+            RealismAnalysisFast(**result)
+            result["reasoning"] = ""
+        return result
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -294,6 +322,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
             args.dry_run,
             filter_dir,
             args.max_dimension,
+            args.fast,
             print_lock,
             move_lock,
         )
@@ -309,6 +338,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
             "threshold": args.threshold,
             "model": args.model,
             "max_dimension": args.max_dimension,
+            "fast": args.fast,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "dry_run": args.dry_run,
         }
@@ -342,6 +372,8 @@ def _self_check():
     assert scaled_dimensions(1000, 2000, 1024) == (512, 1024)
     assert scaled_dimensions(1, 2, 1) == (1, 1)
     assert scaled_dimensions(2, 1, 1) == (1, 1)
+    assert "reasoning" not in RealismAnalysisFast.model_json_schema()["properties"]
+    assert "reasoning" in RealismAnalysis.model_json_schema()["properties"]
     from PIL import Image
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "big.png"

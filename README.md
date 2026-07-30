@@ -71,6 +71,27 @@ image-auditor ~/Downloads --model llava --threshold 8.0
 | `--dry-run` | `False` | Generate report without moving files |
 | `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
+| `--fast` | `False` | Minimal VLM output (score, flag, artifacts only); skips reasoning for faster bulk triage |
+
+### Fast vs full mode (`--fast`)
+
+**Full mode (default)** asks the model for forensic reasoning alongside score, realism flag, and artifact tags. Use this for dry-runs, borderline decisions, and any run where you will read the JSON report before moving files.
+
+**Fast mode** (`--fast`) uses a reduced prompt and schema — `realism_score`, `is_realistic`, and `detected_artifacts` only. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Expect roughly 10–20% faster per image, with larger gains on verbose models.
+
+**When to use `--fast`:**
+
+- Bulk triage on large folders where obvious rejects/keepers dominate
+- A first pass before `--apply-report`, with manual `keep` overrides on edge cases
+- Combined with `--dry-run` to generate scores quickly, then re-run borderline files at full resolution
+
+**When to stay on full mode:**
+
+- First audit of a new collection or model
+- Scores near your threshold (±1.0) where reasoning helps you decide overrides
+- Any workflow where the JSON report is the primary review surface
+
+`--fast` composes with `--dry-run`, parallel Ollama pipelining, and `--max-dimension`.
 
 ### Speed vs accuracy (`--max-dimension`)
 
@@ -96,6 +117,8 @@ If you do enable it, dry-run both ways on a sample folder and compare scores bef
   "meta": {
     "threshold": 7.0,
     "model": "llava",
+    "max_dimension": 0,
+    "fast": false,
     "generated_at": "2026-07-29T12:00:00+00:00",
     "dry_run": true
   },
