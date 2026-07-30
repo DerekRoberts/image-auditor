@@ -58,6 +58,13 @@ image-auditor ~/Downloads --apply-report --threshold 7.5
 image-auditor ~/Downloads --model llava --threshold 8.0
 ```
 
+### Parallel scan (multiple Ollama requests)
+```bash
+image-auditor ~/Downloads --dry-run --workers 4
+```
+
+Vision models are VRAM-heavy. Ollama loads one model copy; `--workers` above 4 prints a GPU contention warning, and values above 16 are capped. Start with `--workers 2` on consumer GPUs and increase only if VRAM headroom allows.
+
 ---
 
 ## CLI Options
@@ -69,6 +76,7 @@ image-auditor ~/Downloads --model llava --threshold 8.0
 | `--model` | `llava` | Local vision model to query via Ollama |
 | `--threshold` | `7.0` (dry-run only) | Minimum score (1.0 to 10.0) required to keep image in-place; **required** when not using `--dry-run` |
 | `--dry-run` | `False` | Generate report without moving files |
+| `--workers` | `1` | Parallel Ollama requests during scan (not used with `--apply-report`) |
 | `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
 
 ---
@@ -80,6 +88,7 @@ image-auditor ~/Downloads --model llava --threshold 8.0
   "meta": {
     "threshold": 7.0,
     "model": "llava",
+    "workers": 1,
     "generated_at": "2026-07-29T12:00:00+00:00",
     "dry_run": true
   },

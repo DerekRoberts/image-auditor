@@ -2,6 +2,8 @@ import argparse
 import json
 import math
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +13,8 @@ from pydantic import BaseModel
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "realism_audit_report.json"
+MAX_WORKERS = 16
+GPU_CONTENTION_WARN_ABOVE = 4
 
 
 class RealismAnalysis(BaseModel):
@@ -41,6 +45,12 @@ def parse_args():
         help="Apply file moves from an audit report without re-analyzing (default: <input_dir>/realism_audit_report.json)",
     )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel Ollama requests during scan (default: 1 = sequential; not used with --apply-report)",
+    )
     args = parser.parse_args()
 
     if args.apply_report is not None and args.dry_run:
@@ -54,6 +64,10 @@ def parse_args():
 
     if not (1.0 <= args.threshold <= 10.0) or math.isnan(args.threshold):
         parser.error(f"--threshold must be between 1.0 and 10.0, got {args.threshold}")
+
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+
     return args
 
 
@@ -72,11 +86,29 @@ def write_report(path: Path, meta: dict, results: list):
         json.dump({"meta": meta, "results": results}, f, indent=2)
 
 
-def score_sort_key(entry: dict) -> float:
+def score_sort_key(entry: dict) -> tuple[float, str]:
     analysis = entry.get("analysis")
-    if analysis and "realism_score" in analysis:
-        return analysis["realism_score"]
-    return -1.0
+    score = analysis["realism_score"] if analysis and "realism_score" in analysis else -1.0
+    return (-score, entry.get("file", ""))
+
+
+def clamp_workers(requested: int) -> int:
+    return min(requested, MAX_WORKERS)
+
+
+def effective_workers(requested: int) -> int:
+    workers = clamp_workers(requested)
+    if requested > MAX_WORKERS:
+        print(
+            f"Warning: --workers capped at {MAX_WORKERS} (requested {requested}). "
+            "Vision models are VRAM-heavy; high concurrency often slows inference."
+        )
+    elif workers > GPU_CONTENTION_WARN_ABOVE:
+        print(
+            f"Warning: --workers {workers} may contend for GPU/VRAM. "
+            "Ollama shares one loaded model; parallel requests queue or compete for memory."
+        )
+    return workers
 
 
 def should_reject(entry: dict, threshold: float) -> bool | None:
@@ -144,6 +176,46 @@ def ensure_model(model_name: str):
         raise SystemExit(f"Error: Cannot reach Ollama. Is 'ollama serve' running? {e}")
 
 
+def process_image(
+    img_path: Path,
+    model_name: str,
+    threshold: float,
+    dry_run: bool,
+    filter_dir: Path,
+    print_lock: threading.Lock,
+) -> dict | None:
+    with print_lock:
+        print(f"Analyzing {img_path.name}...")
+    try:
+        analysis_dict = analyze_image(img_path, model_name)
+        analysis = RealismAnalysis(**analysis_dict)
+    except Exception as e:
+        with print_lock:
+            print(f"Error processing {img_path.name}: {e}")
+        return {"file": img_path.name, "status": "error", "error": str(e)}
+
+    with print_lock:
+        print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+
+    result = {"file": img_path.name, "analysis": analysis_dict}
+
+    if not dry_run:
+        if should_reject(result, threshold):
+            try:
+                move_reject(img_path, filter_dir)
+                with print_lock:
+                    print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
+            except OSError as e:
+                with print_lock:
+                    print(f"  -> Error moving {img_path.name}: {e}")
+                return None
+        else:
+            with print_lock:
+                print("  -> Preserved keeper in place")
+
+    return result
+
+
 def analyze_image(img_path: Path, model_name: str) -> dict:
     response = ollama.chat(
         model=model_name,
@@ -162,42 +234,23 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
     ensure_model(args.model)
 
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()]
-    results = []
+    workers = effective_workers(args.workers)
+    print_lock = threading.Lock()
 
-    for img_path in image_paths:
-        print(f"Analyzing {img_path.name}...")
-        try:
-            analysis_dict = analyze_image(img_path, args.model)
-            analysis = RealismAnalysis(**analysis_dict)
-        except Exception as e:
-            print(f"Error processing {img_path.name}: {e}")
-            results.append({"file": img_path.name, "status": "error", "error": str(e)})
-            continue
+    def process(img_path: Path) -> dict | None:
+        return process_image(img_path, args.model, args.threshold, args.dry_run, filter_dir, print_lock)
 
-        print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = [r for r in executor.map(process, image_paths) if r is not None]
 
-        result = {"file": img_path.name, "analysis": analysis_dict}
-
-        if not args.dry_run:
-            if should_reject(result, args.threshold):
-                try:
-                    move_reject(img_path, filter_dir)
-                    print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
-                except OSError as e:
-                    print(f"  -> Error moving {img_path.name}: {e}")
-                    continue
-            else:
-                print("  -> Preserved keeper in place")
-
-        results.append(result)
-
-    results.sort(key=score_sort_key, reverse=True)
+    results.sort(key=score_sort_key)
 
     if results:
         report_path = input_dir / DEFAULT_REPORT_NAME
         meta = {
             "threshold": args.threshold,
             "model": args.model,
+            "workers": workers,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "dry_run": args.dry_run,
         }
@@ -222,6 +275,12 @@ def _self_check():
         f.flush()
         meta, results = load_report(Path(f.name))
     assert meta is None and results[0]["file"] == "x.jpg"
+    assert effective_workers(1) == 1
+    assert clamp_workers(99) == MAX_WORKERS
+    assert score_sort_key({"file": "b.jpg", "analysis": {"realism_score": 8.0}}) == (-8.0, "b.jpg")
+    assert score_sort_key({"file": "a.jpg", "analysis": {"realism_score": 8.0}}) < score_sort_key(
+        {"file": "b.jpg", "analysis": {"realism_score": 8.0}}
+    )
 
 
 def main():
