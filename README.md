@@ -70,6 +70,13 @@ image-auditor ~/Downloads --model llava --threshold 8.0
 | `--threshold` | `7.0` (dry-run only) | Minimum score (1.0 to 10.0) required to keep image in-place; **required** when not using `--dry-run` |
 | `--dry-run` | `False` | Generate report without moving files |
 | `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
+| `--max-dimension` | `0` | Downscale images so the long edge is at most N px before Ollama analysis (`0` = send originals) |
+
+### Speed vs accuracy (`--max-dimension`)
+
+Vision models typically downsample internally (~336–1024 px on the long edge). Sending 4K originals mostly adds encode and transfer time. `--max-dimension 1024` (or similar) can shave ~10–30% off large images with little change for obvious rejects/keepers.
+
+Tradeoffs: aggressive downscaling can hide micro-artifacts (warped fingers, hair glitches) and inflate keeper scores; JPEG re-encode can add blockiness that looks “AI.” Use `--max-dimension 0` for full-res analysis; re-check borderline keepers at original resolution if needed.
 
 ---
 

@@ -1,7 +1,9 @@
 import argparse
 import json
 import math
+import os
 import shutil
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -44,6 +46,13 @@ def parse_args():
         help="Apply file moves from an audit report without re-analyzing (default: <input_dir>/realism_audit_report.json)",
     )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
+    parser.add_argument(
+        "--max-dimension",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Downscale images so the long edge is at most N px before Ollama analysis (0 = disabled)",
+    )
     args = parser.parse_args()
 
     if args.apply_report is not None and args.dry_run:
@@ -57,6 +66,8 @@ def parse_args():
 
     if not (1.0 <= args.threshold <= 10.0) or math.isnan(args.threshold):
         parser.error(f"--threshold must be between 1.0 and 10.0, got {args.threshold}")
+    if args.max_dimension < 0:
+        parser.error(f"--max-dimension must be >= 0, got {args.max_dimension}")
     return args
 
 
@@ -154,6 +165,37 @@ def apply_from_report(report_path: Path, input_dir: Path, filter_dir: Path, thre
     print(f"\nApply complete: {moved} moved, {kept} kept, {skipped} skipped.")
 
 
+def scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int] | None:
+    if max_dimension <= 0:
+        return None
+    long_edge = max(width, height)
+    if long_edge <= max_dimension:
+        return None
+    scale = max_dimension / long_edge
+    return round(width * scale), round(height * scale)
+
+
+def prepare_analysis_image(img_path: Path, max_dimension: int) -> tuple[Path, Path | None]:
+    """Return (path for Ollama, temp file to delete after analysis, or None)."""
+    if max_dimension <= 0:
+        return img_path, None
+    from PIL import Image
+
+    with Image.open(img_path) as img:
+        new_size = scaled_dimensions(*img.size, max_dimension)
+        if new_size is None:
+            return img_path, None
+        resized = img.resize(new_size, Image.Resampling.LANCZOS)
+        fd, temp_name = tempfile.mkstemp(suffix=img_path.suffix.lower())
+        os.close(fd)
+        temp_path = Path(temp_name)
+        save_kwargs = {}
+        if img_path.suffix.lower() in (".jpg", ".jpeg"):
+            save_kwargs["quality"] = 95
+        resized.save(temp_path, **save_kwargs)
+        return temp_path, temp_path
+
+
 def ensure_model(model_name: str):
     print(f"Checking if model '{model_name}' is available locally...")
     try:
@@ -176,13 +218,14 @@ def process_image(
     threshold: float,
     dry_run: bool,
     filter_dir: Path,
+    max_dimension: int,
     print_lock: threading.Lock,
     move_lock: threading.Lock,
 ) -> dict:
     with print_lock:
         print(f"Analyzing {img_path.name}...")
     try:
-        analysis_dict = analyze_image(img_path, model_name)
+        analysis_dict = analyze_image(img_path, model_name, max_dimension)
         analysis = RealismAnalysis(**analysis_dict)
     except Exception as e:
         with print_lock:
@@ -211,18 +254,23 @@ def process_image(
     return result
 
 
-def analyze_image(img_path: Path, model_name: str) -> dict:
-    response = ollama.chat(
-        model=model_name,
-        messages=[{
-            "role": "user",
-            "content": "Analyze this image for photorealism. Identify if it is realistic, rate it from 1.0 to 10.0, list any AI-generated artifacts, and explain your reasoning.",
-            "images": [str(img_path)]
-        }],
-        format=RealismAnalysis.model_json_schema(),
-        options={"temperature": 0}
-    )
-    return json.loads(response.message.content)
+def analyze_image(img_path: Path, model_name: str, max_dimension: int = 0) -> dict:
+    send_path, temp_path = prepare_analysis_image(img_path, max_dimension)
+    try:
+        response = ollama.chat(
+            model=model_name,
+            messages=[{
+                "role": "user",
+                "content": "Analyze this image for photorealism. Identify if it is realistic, rate it from 1.0 to 10.0, list any AI-generated artifacts, and explain your reasoning.",
+                "images": [str(send_path)]
+            }],
+            format=RealismAnalysis.model_json_schema(),
+            options={"temperature": 0}
+        )
+        return json.loads(response.message.content)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def run_audit(args, input_dir: Path, filter_dir: Path):
@@ -235,7 +283,14 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
 
     def process(img_path: Path) -> dict:
         return process_image(
-            img_path, args.model, args.threshold, args.dry_run, filter_dir, print_lock, move_lock
+            img_path,
+            args.model,
+            args.threshold,
+            args.dry_run,
+            filter_dir,
+            args.max_dimension,
+            print_lock,
+            move_lock,
         )
 
     with ThreadPoolExecutor(max_workers=depth) as executor:
@@ -248,6 +303,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
         meta = {
             "threshold": args.threshold,
             "model": args.model,
+            "max_dimension": args.max_dimension,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "dry_run": args.dry_run,
         }
@@ -275,7 +331,23 @@ def _self_check():
     assert pipeline_depth(0) == 1
     assert pipeline_depth(3) == 3
     assert pipeline_depth(100) == MAX_IN_FLIGHT
-    import tempfile
+    assert scaled_dimensions(100, 50, 0) is None
+    assert scaled_dimensions(100, 50, 200) is None
+    assert scaled_dimensions(2000, 1000, 1024) == (1024, 512)
+    assert scaled_dimensions(1000, 2000, 1024) == (512, 1024)
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "big.png"
+        Image.new("RGB", (400, 200), "red").save(src)
+        send_path, temp_path = prepare_analysis_image(src, 100)
+        assert temp_path is not None
+        try:
+            assert send_path != src
+            assert Image.open(send_path).size == (100, 50)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        assert prepare_analysis_image(src, 0) == (src, None)
+        assert prepare_analysis_image(src, 500) == (src, None)
     with tempfile.TemporaryDirectory() as tmp:
         rejects = Path(tmp)
         (rejects / "a.jpg").write_text("old")
