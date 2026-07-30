@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -265,6 +266,7 @@ def process_image(
         analysis = RealismAnalysis(**analysis_dict)
     except Exception as e:
         with print_lock:
+            traceback.print_exc()
             print(f"{tag}Error processing {img_path.name}: {e}")
         return {"file": img_path.name, "status": "error", "error": str(e)}
 
@@ -427,6 +429,91 @@ def _self_check():
     for t in threads:
         t.join()
     assert len(seen) == 8 and len(set(seen)) == 8
+    _check_process_image_error_handling()
+    _check_run_audit_progress_tags()
+
+
+def _check_process_image_error_handling():
+    import io
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        img = Path(tmp) / "x.jpg"
+        img.write_bytes(b"x")
+        err = io.StringIO()
+        out = io.StringIO()
+        with patch.object(mod, "analyze_image", side_effect=RuntimeError("unexpected")), redirect_stderr(err), redirect_stdout(out):
+            result = process_image(
+                img, "llava", 7.0, True, Path(tmp) / "rejects", 0, False,
+                threading.Lock(), threading.Lock(), ScanProgress(2),
+            )
+        assert result == {"file": "x.jpg", "status": "error", "error": "unexpected"}
+        assert "Traceback" in err.getvalue()
+        assert "RuntimeError: unexpected" in err.getvalue()
+        assert "[1/2] Error processing x.jpg: unexpected" in out.getvalue()
+
+
+def _check_run_audit_progress_tags():
+    import io
+    import re
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        input_dir = Path(tmp) / "photos"
+        filter_dir = Path(tmp) / "rejects"
+        input_dir.mkdir()
+        for name in ("good.jpg", "bad.jpg", "fail.jpg"):
+            (input_dir / name).write_bytes(b"x")
+
+        def mock_analyze(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+            if img_path.name == "fail.jpg":
+                raise RuntimeError("boom")
+            score = 5.0 if img_path.name == "bad.jpg" else 8.0
+            return {
+                "realism_score": score,
+                "is_realistic": score >= 7.0,
+                "detected_artifacts": [],
+                "reasoning": "test",
+            }
+
+        args = argparse.Namespace(
+            model="llava",
+            threshold=7.0,
+            dry_run=False,
+            max_dimension=0,
+            fast=False,
+            report_path_display=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_image", side_effect=mock_analyze), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            run_audit(args, input_dir, filter_dir)
+
+        out = captured.getvalue()
+        analyzing_tags = re.findall(r"(\[\d+/3\]) Analyzing (\S+?)\.\.\.", out)
+        assert len(analyzing_tags) == 3
+        assert len({tag for tag, _ in analyzing_tags}) == 3
+
+        by_tag = {tag: fname for tag, fname in analyzing_tags}
+        for tag, fname in by_tag.items():
+            tag_lines = [line for line in out.splitlines() if line.startswith(tag)]
+            if fname == "fail.jpg":
+                assert any("Error processing fail.jpg" in line for line in tag_lines)
+            else:
+                assert any("Score:" in line for line in tag_lines)
+            if fname == "bad.jpg":
+                assert any("Moved filtered image" in line for line in tag_lines)
+            elif fname == "good.jpg":
+                assert any("Preserved keeper" in line for line in tag_lines)
+
+        _, results = load_report(input_dir / DEFAULT_REPORT_NAME)
+        assert len(results) == 3
+        assert sum(entry.get("status") == "error" for entry in results) == 1
 
 
 def main():
