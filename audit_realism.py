@@ -51,7 +51,7 @@ def parse_args():
         type=int,
         default=0,
         metavar="N",
-        help="Downscale images so the long edge is at most N px before Ollama analysis (0 = disabled)",
+        help="Optional downscale before Ollama: long edge at most N px (0 = disabled, default)",
     )
     args = parser.parse_args()
 
