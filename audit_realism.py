@@ -19,7 +19,11 @@ def parse_args():
     parser.add_argument("--threshold", type=float, default=7.0, help="Minimum floating point realism score (1.0 to 10.0) to keep image in-place")
     parser.add_argument("--dry-run", action="store_true", help="Generate the JSON report without physically moving files into filter_dir")
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
-    return parser.parse_args()
+    args = parser.parse_args()
+    import math
+    if not (1.0 <= args.threshold <= 10.0) or math.isnan(args.threshold):
+        parser.error(f"--threshold must be between 1.0 and 10.0, got {args.threshold}")
+    return args
 
 def ensure_model(model_name: str):
     print(f"Checking if model '{model_name}' is available locally...")
@@ -81,25 +85,30 @@ def main():
 
         try:
             analysis = RealismAnalysis(**analysis_dict)
-            
-            result = {
-                "file": img_path.name,
-                "analysis": analysis_dict
-            }
-            results.append(result)
-            
-            print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
-            
-            if not args.dry_run:
-                # Keepers stay in place in input_dir; rejects get moved out to filter_dir
-                if analysis.realism_score < args.threshold:
-                    shutil.move(str(img_path), str(filter_dir / img_path.name))
-                    print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
-                else:
-                    print("  -> Preserved keeper in place")
-                
         except Exception as e:
             print(f"Error parsing analysis output for {img_path.name}: {e}")
+            continue
+
+        print(f"  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+
+        result = {
+            "file": img_path.name,
+            "analysis": analysis_dict
+        }
+
+        if not args.dry_run:
+            # Keepers stay in place in input_dir; rejects get moved out to filter_dir
+            if analysis.realism_score < args.threshold:
+                try:
+                    shutil.move(str(img_path), str(filter_dir / img_path.name))
+                    print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
+                except OSError as e:
+                    print(f"  -> Error moving {img_path.name}: {e}")
+                    continue
+            else:
+                print("  -> Preserved keeper in place")
+
+        results.append(result)
 
     results.sort(key=lambda x: x["analysis"]["realism_score"], reverse=True)
 
@@ -108,7 +117,7 @@ def main():
         with open(report_path, "w") as f:
             json.dump(results, f, indent=2)
         display_report_path = args.report_path_display or str(report_path)
-        print(f"\nAudit complete! Processed {len(image_paths)} images.")
+        print(f"\nAudit complete! {len(results)} of {len(image_paths)} images processed successfully.")
         print(f"Report saved to {display_report_path}")
     else:
         print(f"\nNo images were successfully processed out of {len(image_paths)} found.")

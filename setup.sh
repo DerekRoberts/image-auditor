@@ -41,10 +41,18 @@ for ((i=1; i<=$#; i++)); do
         IS_DRY_RUN=true
         ARGS+=("$arg")
     elif [ "$arg" == "--filter-dir" ]; then
+        if [ -z "$next_arg" ] || [[ "$next_arg" == -* ]]; then
+            echo "Error: --filter-dir requires a directory path argument." >&2
+            exit 1
+        fi
         FILTER_HOST_DIR="$next_arg"
         skip_next=true
     elif [[ "$arg" == --filter-dir=* ]]; then
         FILTER_HOST_DIR="${arg#*=}"
+        if [ -z "$FILTER_HOST_DIR" ]; then
+            echo "Error: --filter-dir requires a non-empty directory path." >&2
+            exit 1
+        fi
     elif [[ "$arg" != -* ]] && [ -d "$arg" ]; then
         TARGET_DIR="$arg"
     else
