@@ -47,6 +47,12 @@ image-auditor ~/Downloads --threshold 7.5
 image-auditor ~/Downloads --dry-run
 ```
 
+### Apply moves from a reviewed report (no Ollama)
+After reviewing or hand-editing `realism_audit_report.json`:
+```bash
+image-auditor ~/Downloads --apply-report --threshold 7.5
+```
+
 ### Specify custom vision model
 ```bash
 image-auditor ~/Downloads --model llava --threshold 8.0
@@ -61,29 +67,46 @@ image-auditor ~/Downloads --model llava --threshold 8.0
 | `directory` | `.` | Target input directory containing images (`.png`, `.jpg`, `.jpeg`, `.webp`) |
 | `--filter-dir` | `<input_dir>/rejects` | Directory to move filtered-out/rejected files into |
 | `--model` | `llava` | Local vision model to query via Ollama |
-| `--threshold` | `7.0` | Minimum score (1.0 to 10.0) required to keep image in-place |
+| `--threshold` | `7.0` (dry-run only) | Minimum score (1.0 to 10.0) required to keep image in-place; **required** when not using `--dry-run` |
 | `--dry-run` | `False` | Generate report without moving files |
+| `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
 
 ---
 
 ## Sample JSON Audit Report (`realism_audit_report.json`)
 
 ```json
-[
-  {
-    "file": "beach_portrait.jpg",
-    "analysis": {
-      "realism_score": 8.5,
-      "is_realistic": true,
-      "detected_artifacts": [
-        "AI-generated background texture",
-        "Overly uniform skin smoothness"
-      ],
-      "reasoning": "The image features realistic lighting and natural human posture. However, minor AI artifacts are present in the hair texture and background foliage."
+{
+  "meta": {
+    "threshold": 7.0,
+    "model": "llava",
+    "generated_at": "2026-07-29T12:00:00+00:00",
+    "dry_run": true
+  },
+  "results": [
+    {
+      "file": "beach_portrait.jpg",
+      "analysis": {
+        "realism_score": 8.5,
+        "is_realistic": true,
+        "detected_artifacts": [
+          "AI-generated background texture",
+          "Overly uniform skin smoothness"
+        ],
+        "reasoning": "The image features realistic lighting and natural human posture. However, minor AI artifacts are present in the hair texture and background foliage."
+      }
+    },
+    {
+      "file": "broken.jpg",
+      "status": "error",
+      "error": "Error processing broken.jpg: ...",
+      "keep": null
     }
-  }
-]
+  ]
+}
 ```
+
+Each result may include an optional `keep` field (`true` = never move, `false` = always move). Failed entries require `keep` before apply will move them. Legacy bare-array reports are still accepted on read.
 
 ---
 
