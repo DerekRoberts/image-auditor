@@ -1,8 +1,8 @@
-# AI Image Realism Auditor & Sorter
+# Image Auditor
 
-A local CLI tool for auditing and sorting AI-generated images based on photorealism using local vision LLMs via [Ollama](https://ollama.com).
+A local CLI tool for auditing, deduplicating, and sorting photo collections and AI generations using local vision LLMs via [Ollama](https://ollama.com).
 
-Evaluates image quality, detects AI generation artifacts (e.g. plastic skin, warped fingers, lighting inconsistencies), scores photorealism from 1.0 to 10.0, and automatically sorts files into `keepers/` or `rejects/` folders based on a configurable threshold.
+Evaluates image quality, detects generation artifacts and defects (e.g. plastic skin, warped fingers, lighting errors), scores quality from 1.0 to 10.0, and automatically filters unwanted photos into a target directory while preserving keepers in-place.
 
 ---
 
@@ -10,7 +10,7 @@ Evaluates image quality, detects AI generation artifacts (e.g. plastic skin, war
 
 - **Local & Private:** Queries local vision models (`llava`, `llama3.2-vision`, `qwen2.5-vl`) running via Ollama — zero cloud API costs or data leakage.
 - **Structured Pydantic Output:** Enforces JSON schema validation for reliable numerical scores, boolean flags, artifact tags, and forensic reasoning.
-- **Automated Image Sorting:** Automatically segregates images into `<input_dir>/keepers` or `<input_dir>/rejects`.
+- **Automated Image Sorting:** Preserves quality images in-place and moves filtered files to `--filter-dir`.
 - **Dry-Run Mode:** Generate diagnostic JSON reports without moving any image files.
 - **Containerized CLI:** Pre-packaged wrapper for Podman / Docker to run like a native binary from anywhere on your system.
 
@@ -26,12 +26,12 @@ Evaluates image quality, detects AI generation artifacts (e.g. plastic skin, war
 Clone the repository and run the setup script:
 
 ```bash
-git clone https://github.com/<your-username>/image_auditor.git
-cd image_auditor
+git clone https://github.com/DerekRoberts/image-auditor.git
+cd image-auditor
 ./setup.sh
 ```
 
-The `./setup.sh` script builds the container image and installs the standalone `audit-realism` binary wrapper into `~/.local/bin/audit-realism`.
+The `./setup.sh` script builds the container image and installs the standalone `image-auditor` binary wrapper into `~/.local/bin/image-auditor`.
 
 ---
 
@@ -39,17 +39,17 @@ The `./setup.sh` script builds the container image and installs the standalone `
 
 ### Run from anywhere
 ```bash
-audit-realism ~/Downloads --threshold 7.5
+image-auditor ~/Downloads --threshold 7.5
 ```
 
 ### Dry-run (JSON report only, no file movements)
 ```bash
-audit-realism ~/Downloads --dry-run
+image-auditor ~/Downloads --dry-run
 ```
 
 ### Specify custom vision model
 ```bash
-audit-realism ~/Downloads --model llava --threshold 8.0
+image-auditor ~/Downloads --model llava --threshold 8.0
 ```
 
 ---
@@ -59,8 +59,9 @@ audit-realism ~/Downloads --model llava --threshold 8.0
 | Flag | Default | Description |
 | --- | --- | --- |
 | `directory` | `.` | Target input directory containing images (`.png`, `.jpg`, `.jpeg`, `.webp`) |
+| `--filter-dir` | `<input_dir>/rejects` | Directory to move filtered-out/rejected files into |
 | `--model` | `llava` | Local vision model to query via Ollama |
-| `--threshold` | `7.0` | Minimum score (1.0 to 10.0) required to move image to `keepers/` |
+| `--threshold` | `7.0` | Minimum score (1.0 to 10.0) required to keep image in-place |
 | `--dry-run` | `False` | Generate report without moving files |
 
 ---
