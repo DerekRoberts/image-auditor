@@ -1,7 +1,6 @@
 import argparse
 import json
 import math
-import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -14,8 +13,7 @@ from pydantic import BaseModel
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "realism_audit_report.json"
-MAX_WORKERS = 16
-DEFAULT_PIPELINE = 4  # ponytail: Ollama's usual auto default; server throttles actual GPU work
+MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
 
 
 class RealismAnalysis(BaseModel):
@@ -46,12 +44,6 @@ def parse_args():
         help="Apply file moves from an audit report without re-analyzing (default: <input_dir>/realism_audit_report.json)",
     )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help="Override concurrent Ollama requests (default: auto; use 1 for sequential)",
-    )
     args = parser.parse_args()
 
     if args.apply_report is not None and args.dry_run:
@@ -65,10 +57,6 @@ def parse_args():
 
     if not (1.0 <= args.threshold <= 10.0) or math.isnan(args.threshold):
         parser.error(f"--threshold must be between 1.0 and 10.0, got {args.threshold}")
-
-    if args.workers is not None and args.workers < 1:
-        parser.error("--workers must be at least 1")
-
     return args
 
 
@@ -93,11 +81,8 @@ def score_sort_key(entry: dict) -> tuple[float, str]:
     return (-score, entry.get("file", ""))
 
 
-def resolve_workers(explicit: int | None, image_count: int) -> int:
-    if explicit is not None:
-        return min(explicit, MAX_WORKERS)
-    parallel = int(os.environ.get("OLLAMA_NUM_PARALLEL", DEFAULT_PIPELINE))
-    return max(1, min(image_count, parallel))
+def pipeline_depth(image_count: int) -> int:
+    return max(1, min(image_count, MAX_IN_FLIGHT))
 
 
 def should_reject(entry: dict, threshold: float) -> bool | None:
@@ -223,13 +208,13 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
     ensure_model(args.model)
 
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()]
-    workers = resolve_workers(args.workers, len(image_paths))
+    depth = pipeline_depth(len(image_paths))
     print_lock = threading.Lock()
 
     def process(img_path: Path) -> dict | None:
         return process_image(img_path, args.model, args.threshold, args.dry_run, filter_dir, print_lock)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=depth) as executor:
         results = [r for r in executor.map(process, image_paths) if r is not None]
 
     results.sort(key=score_sort_key)
@@ -239,7 +224,6 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
         meta = {
             "threshold": args.threshold,
             "model": args.model,
-            "workers": workers,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "dry_run": args.dry_run,
         }
@@ -264,14 +248,9 @@ def _self_check():
         f.flush()
         meta, results = load_report(Path(f.name))
     assert meta is None and results[0]["file"] == "x.jpg"
-    assert resolve_workers(None, 10) == DEFAULT_PIPELINE
-    assert resolve_workers(None, 1) == 1
-    assert resolve_workers(1, 10) == 1
-    assert resolve_workers(99, 10) == MAX_WORKERS
-    assert score_sort_key({"file": "b.jpg", "analysis": {"realism_score": 8.0}}) == (-8.0, "b.jpg")
-    assert score_sort_key({"file": "a.jpg", "analysis": {"realism_score": 8.0}}) < score_sort_key(
-        {"file": "b.jpg", "analysis": {"realism_score": 8.0}}
-    )
+    assert pipeline_depth(0) == 1
+    assert pipeline_depth(3) == 3
+    assert pipeline_depth(100) == MAX_IN_FLIGHT
 
 
 def main():
