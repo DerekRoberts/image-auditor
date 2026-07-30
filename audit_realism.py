@@ -66,9 +66,6 @@ def main():
         return
 
     filter_dir = Path(args.filter_dir) if args.filter_dir else input_dir / "rejects"
-    
-    if not args.dry_run:
-        filter_dir.mkdir(parents=True, exist_ok=True)
 
     supported_extensions = {".png", ".jpg", ".jpeg", ".webp"}
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in supported_extensions and p.is_file()]
@@ -100,6 +97,7 @@ def main():
             # Keepers stay in place in input_dir; rejects get moved out to filter_dir
             if analysis.realism_score < args.threshold:
                 try:
+                    filter_dir.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(img_path), str(filter_dir / img_path.name))
                     print(f"  -> Moved filtered image to {filter_dir / img_path.name}")
                 except OSError as e:
