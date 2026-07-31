@@ -22,7 +22,7 @@ MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU w
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
 PROFILE_NAMES = ("mixed", "ai-fun", "photos")
-IMPLEMENTED_LENSES = frozenset({"ai", "generation"})
+IMPLEMENTED_LENSES = frozenset({"ai", "generation", "quality"})
 LENS_ISSUE = {"generation": "#18", "quality": "#19", "hygiene": "#3"}
 
 
@@ -105,6 +105,11 @@ class QualityVerdict(BaseModel):
     keeper_score: float
     issues: list[str] = []
     reasoning: str = ""
+
+
+class QualityVerdictFast(BaseModel):
+    keeper_score: float
+    issues: list[str] = []
 
 
 class GenerationVerdict(BaseModel):
@@ -614,6 +619,16 @@ def process_image(
             }
             with print_lock:
                 print(f"{tag}  Success: {verdict.success_score}")
+        if "quality" in config.lenses:
+            qual_dict = analyze_quality(img_path, model_name, max_dimension, fast)
+            verdict = QualityVerdict(**qual_dict)
+            blocks["quality"] = {
+                "keeper_score": verdict.keeper_score,
+                "issues": verdict.issues,
+                "reasoning": verdict.reasoning,
+            }
+            with print_lock:
+                print(f"{tag}  Keeper: {verdict.keeper_score}")
     except Exception as e:
         with print_lock:
             traceback.print_exc()
@@ -653,6 +668,52 @@ def process_image(
                 print(f"{tag}  -> Preserved keeper in place")
 
     return result
+
+
+def analyze_quality(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+    send_path, temp_path = prepare_analysis_image(img_path, max_dimension)
+    if fast:
+        prompt = (
+            "Score this real photograph for album keeper quality (1.0-10.0). "
+            "Would someone keep this in a photo album? Focus on blur, exposure, "
+            "framing accidents, and screenshots — NOT whether the image is AI-generated. "
+            "Return keeper_score and issues only. Do not explain."
+        )
+        schema = QualityVerdictFast.model_json_schema()
+    else:
+        prompt = (
+            "Score this real photograph for KEEPER / album-worthiness (1.0-10.0): "
+            "would someone keep this in a photo album? Focus on technical and compositional "
+            "quality — NOT whether the image is AI-generated or synthetic. "
+            "Flag concrete issues as short snake_case tags, e.g. motion_blur, out_of_focus, "
+            "underexposed, overexposed, eyes_closed, accidental_frame, finger_on_lens, "
+            "pocket_shot, floor_shot, screenshot, ui_chrome, duplicate_feel. "
+            "High scores for sharp, well-exposed, intentional shots; low scores for "
+            "accidental pocket/floor captures, heavy blur, closed eyes on faces, or "
+            "screenshots with UI chrome. Explain your reasoning."
+        )
+        schema = QualityVerdict.model_json_schema()
+    try:
+        response = ollama.chat(
+            model=model_name,
+            messages=[{
+                "role": "user",
+                "content": prompt,
+                "images": [str(send_path)],
+            }],
+            format=schema,
+            options={"temperature": 0},
+        )
+        result = json.loads(response.message.content)
+        if fast:
+            QualityVerdictFast(**result)
+            result["reasoning"] = ""
+        else:
+            QualityVerdict(**result)
+        return result
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def analyze_generation(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
@@ -815,6 +876,17 @@ def _self_check():
         {"thresholds": {"ai": 7.0, "quality": None, "generation": None}},
     ) is False
     assert should_reject({"file": "k.jpg", "quality": {"keeper_score": 3.0, "issues": []}}, 7.0) is None
+    photos_meta = {"thresholds": {"ai": None, "quality": 6.0, "generation": None}}
+    assert should_reject(
+        {"file": "blur.jpg", "quality": {"keeper_score": 3.0, "issues": ["motion_blur"], "reasoning": ""}},
+        6.0,
+        photos_meta,
+    ) is True
+    assert should_reject(
+        {"file": "sharp.jpg", "quality": {"keeper_score": 8.0, "issues": [], "reasoning": ""}},
+        6.0,
+        photos_meta,
+    ) is False
     gen_meta = {"thresholds": {"ai": None, "quality": None, "generation": 7.0}}
     assert should_reject(
         {"file": "octo.jpg", "generation": {"success_score": 8.5, "issues": [], "reasoning": ""}},
@@ -849,12 +921,9 @@ def _self_check():
         pass
     else:
         raise AssertionError("expected ValueError for empty --checks")
-    try:
-        validate_audit_config(resolve_audit_config(profile="photos", checks=None, threshold=6.0, threshold_ai=None, threshold_quality=None, threshold_generation=None))
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("photos profile should fail validation")
+    photos = resolve_audit_config(profile="photos", checks=None, threshold=6.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    assert photos.profile == "photos" and photos.lenses == ("quality",) and photos.thresholds["quality"] == 6.0
+    validate_audit_config(photos)
     ai_block = analysis_to_ai_block(
         {"realism_score": 8.0, "is_realistic": True, "detected_artifacts": ["x"], "reasoning": "ok"}
     )
@@ -888,6 +957,8 @@ def _self_check():
     assert "reasoning" in RealismAnalysis.model_json_schema()["properties"]
     assert "reasoning" not in GenerationVerdictFast.model_json_schema()["properties"]
     assert "reasoning" in GenerationVerdict.model_json_schema()["properties"]
+    assert "reasoning" not in QualityVerdictFast.model_json_schema()["properties"]
+    assert "reasoning" in QualityVerdict.model_json_schema()["properties"]
     from PIL import Image
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "big.png"
@@ -923,6 +994,72 @@ def _self_check():
     _check_process_image_error_handling()
     _check_run_audit_progress_tags()
     _check_generation_profile_audit()
+    _check_quality_profile_audit()
+
+
+def _check_quality_profile_audit():
+    import io
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        input_dir = Path(tmp) / "photos"
+        filter_dir = Path(tmp) / "rejects"
+        input_dir.mkdir()
+        for name in ("sunset.jpg", "pocket.jpg", "fail.jpg"):
+            (input_dir / name).write_bytes(b"x")
+
+        def mock_quality(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+            if img_path.name == "fail.jpg":
+                raise RuntimeError("boom")
+            if img_path.name == "pocket.jpg":
+                return {"keeper_score": 2.5, "issues": ["pocket_shot", "accidental_frame"], "reasoning": "accidental pocket capture"}
+            return {"keeper_score": 8.5, "issues": [], "reasoning": "sharp sunset, well exposed"}
+
+        config = resolve_audit_config(
+            profile="photos", checks=None, threshold=6.0,
+            threshold_ai=None, threshold_quality=None, threshold_generation=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "analyze_quality", side_effect=mock_quality), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            for img in sorted(input_dir.iterdir()):
+                process_image(
+                    img, "llava", config, 6.0, True, filter_dir, 512, False,
+                    threading.Lock(), threading.Lock(), ScanProgress(3),
+                )
+
+        out = captured.getvalue()
+        assert "Keeper: 8.5" in out
+        assert "Keeper: 2.5" in out
+        assert "Error processing fail.jpg" in out
+
+        args = argparse.Namespace(
+            model="llava",
+            threshold=6.0,
+            threshold_ai=None,
+            threshold_quality=None,
+            threshold_generation=None,
+            profile="photos",
+            checks=None,
+            dry_run=True,
+            max_dimension=512,
+            fast=False,
+            report_path_display=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_quality", side_effect=mock_quality), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            run_audit(args, input_dir, filter_dir)
+
+        meta, results = load_report(input_dir / DEFAULT_REPORT_NAME)
+        assert meta["profile"] == "photos"
+        assert meta["max_dimension"] == 512
+        by_file = {r["file"]: r for r in results}
+        assert by_file["sunset.jpg"]["quality"]["keeper_score"] == 8.5
+        assert by_file["pocket.jpg"]["quality"]["keeper_score"] == 2.5
+        assert "pocket_shot" in by_file["pocket.jpg"]["quality"]["issues"]
+        assert by_file["fail.jpg"]["status"] == "error"
 
 
 def _check_generation_profile_audit():
