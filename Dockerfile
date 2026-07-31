@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY audit_realism.py .
+COPY image_cull.py .
 
-ENTRYPOINT ["python", "audit_realism.py"]
+ENTRYPOINT ["python", "image_cull.py"]
