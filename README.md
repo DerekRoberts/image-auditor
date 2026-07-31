@@ -65,7 +65,7 @@ Profiles select which analysis lenses run and set default thresholds. Without `-
 | Profile | Question | Lenses | Status |
 | --- | --- | --- | --- |
 | `mixed` (recommended for unknown folders) | What is this and should I keep it? | `ai` (+ `hygiene`, `quality` when #3/#19 land) | **AI lens working** |
-| `ai-fun` | Is this render successful / worth keeping? | `generation` (+ optional `hygiene`) | Generation lens pending (#18) |
+| `ai-fun` | Is this render successful / worth keeping? | `generation` (+ optional `hygiene`) | **Generation lens working** |
 | `photos` | Is this a keeper real photo? | `quality` (+ optional `hygiene` when #3 lands) | Quality lens pending (#19) |
 
 **Mixed folder (fully working today):**
@@ -76,11 +76,24 @@ image-auditor ~/Downloads --profile mixed --threshold 7.5
 
 Reports use the multi-dimensional layout: `meta.profile`, `meta.thresholds`, and per-file `ai` blocks (not legacy `analysis`).
 
-**AI art folder (exits until generation lens ships):**
+**AI art folder (`ai-fun` — generation success, not photorealism):**
+
+For intentional AI art, photorealism is the wrong metric. The generation lens scores whether a render *succeeded* and is worth keeping — not whether it looks like a photograph.
+
+| Image | Realism score (wrong lens) | Generation success (right lens) |
+| --- | --- | --- |
+| Octo-rex mashup, coherent | Low | **High** — creative, readable subjects |
+| T-rex with six fingers | Low | **Low** — anatomical failure |
+| Melted face / garbled text | Low | **Low** — broken render |
+| Stylized but clean cartoon | Low | **High** — if that's the intent |
+
 ```bash
 image-auditor ~/AI-Art --profile ai-fun --dry-run
-# → clear error: generation lens not implemented yet (see #18)
+image-auditor ~/AI-Art --profile ai-fun --threshold 7.5
+image-auditor ~/AI-Art --profile ai-fun --fast --max-dimension 1024 --dry-run
 ```
+
+Reports use `generation` blocks with `success_score`, `issues[]`, and `reasoning`. Rejects when `success_score` is below `--threshold-generation` (or `--threshold`, which maps to the profile's primary lens). Set `"keep": true` on edge cases after dry-run review to preserve them on `--apply-report`.
 
 **Camera roll / Takeout (exits until quality lens ships):**
 ```bash
@@ -122,7 +135,7 @@ image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.
 
 **Full mode (default)** asks the model for forensic reasoning alongside score, realism flag, and artifact tags. Use this for dry-runs, borderline decisions, and any run where you will read the JSON report before moving files.
 
-**Fast mode** (`--fast`) uses a reduced prompt and schema — `realism_score`, `is_realistic`, and `detected_artifacts` only. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Expect roughly 10–20% faster per image, with larger gains on verbose models.
+**Fast mode** (`--fast`) uses a reduced prompt and schema — score and artifact tags only, no model reasoning. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Works for both `ai` (realism) and `generation` (success) lenses. Expect roughly 10–20% faster per image, with larger gains on verbose models.
 
 **When to use `--fast`:**
 
@@ -277,7 +290,7 @@ Example with multiple lenses once hygiene/quality/generation ship (`ai-fun` / `p
 }
 ```
 
-**Backward compatibility:** reports with top-level `analysis` / `realism_score` still load and apply using `meta.threshold` (or `meta.thresholds.ai`). Multi-dimensional `ai` blocks use the same score semantics without the legacy `analysis` wrapper. Composite reject policy across multiple scored lenses is defined in a follow-up issue; until then, `--apply-report` uses the AI/realism threshold for scored entries and honors `hygiene.action` plus `keep` overrides.
+**Backward compatibility:** reports with top-level `analysis` / `realism_score` still load and apply using `meta.threshold` (or `meta.thresholds.ai`). Multi-dimensional `ai` and `generation` blocks use per-dimension thresholds from `meta.thresholds`. Composite reject policy across multiple scored lenses is defined in a follow-up issue; until then, `--apply-report` rejects when any scored dimension with an active threshold falls below its cutoff, and honors `hygiene.action` plus `keep` overrides.
 
 ---
 

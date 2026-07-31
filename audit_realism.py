@@ -22,7 +22,7 @@ MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU w
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
 PROFILE_NAMES = ("mixed", "ai-fun", "photos")
-IMPLEMENTED_LENSES = frozenset({"ai"})
+IMPLEMENTED_LENSES = frozenset({"ai", "generation"})
 LENS_ISSUE = {"generation": "#18", "quality": "#19", "hygiene": "#3"}
 
 
@@ -111,6 +111,11 @@ class GenerationVerdict(BaseModel):
     success_score: float
     issues: list[str] = []
     reasoning: str = ""
+
+
+class GenerationVerdictFast(BaseModel):
+    success_score: float
+    issues: list[str] = []
 
 
 def default_thresholds(threshold: float) -> dict[str, float | None]:
@@ -446,13 +451,21 @@ def should_reject(entry: dict, threshold: float, meta: dict | None = None) -> bo
         if action == "keep":
             return False
 
-    score = legacy_analysis_score(entry)
-    if score is None:
-        return None
-    ai_threshold = effective_thresholds(meta, threshold)["ai"]
-    if ai_threshold is None:
-        return None
-    return score < ai_threshold
+    thresholds = effective_thresholds(meta, threshold)
+    scored = False
+    for dim in SCORED_DIMENSIONS:
+        cutoff = thresholds.get(dim)
+        if cutoff is None:
+            continue
+        score = dimension_score(entry, dim)
+        if score is None and dim == "ai":
+            score = entry.get("analysis", {}).get("realism_score")
+        if score is None:
+            continue
+        scored = True
+        if score < cutoff:
+            return True
+    return False if scored else None
 
 
 def unique_reject_path(filter_dir: Path, filename: str) -> Path:
@@ -591,6 +604,16 @@ def process_image(
             blocks["ai"] = analysis_to_ai_block(analysis_dict)
             with print_lock:
                 print(f"{tag}  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
+        if "generation" in config.lenses:
+            gen_dict = analyze_generation(img_path, model_name, max_dimension, fast)
+            verdict = GenerationVerdict(**gen_dict)
+            blocks["generation"] = {
+                "success_score": verdict.success_score,
+                "issues": verdict.issues,
+                "reasoning": verdict.reasoning,
+            }
+            with print_lock:
+                print(f"{tag}  Success: {verdict.success_score}")
     except Exception as e:
         with print_lock:
             traceback.print_exc()
@@ -630,6 +653,51 @@ def process_image(
                 print(f"{tag}  -> Preserved keeper in place")
 
     return result
+
+
+def analyze_generation(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+    send_path, temp_path = prepare_analysis_image(img_path, max_dimension)
+    if fast:
+        prompt = (
+            "Score this AI-generated image for generation success (1.0-10.0). "
+            "Did the render succeed? Focus on subject coherence, anatomy sanity, and generation "
+            "artifacts — NOT photorealism. Do not penalize stylization or surreal mashups. "
+            "Return success_score and issues only. Do not explain."
+        )
+        schema = GenerationVerdictFast.model_json_schema()
+    else:
+        prompt = (
+            "Score this AI-generated image for generation SUCCESS (1.0-10.0): did the render "
+            "succeed and is it worth keeping? Focus on subject coherence, anatomical/proportion "
+            "sanity for depicted subjects, artifact severity, and composition readability. "
+            "Do NOT penalize stylization, surreal mashups, cartoon aesthetics, or non-photoreal "
+            "intent — a coherent creative mashup scores high. Flag hard failures: extra/missing "
+            "limbs, melted features, garbled text, unreadable subjects, obvious generation "
+            "collapse. List issues as short snake_case tags (e.g. extra_limbs, garbled_text, "
+            "subject_unrecognizable). Explain your reasoning."
+        )
+        schema = GenerationVerdict.model_json_schema()
+    try:
+        response = ollama.chat(
+            model=model_name,
+            messages=[{
+                "role": "user",
+                "content": prompt,
+                "images": [str(send_path)],
+            }],
+            format=schema,
+            options={"temperature": 0},
+        )
+        result = json.loads(response.message.content)
+        if fast:
+            GenerationVerdictFast(**result)
+            result["reasoning"] = ""
+        else:
+            GenerationVerdict(**result)
+        return result
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def analyze_image(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
@@ -747,6 +815,23 @@ def _self_check():
         {"thresholds": {"ai": 7.0, "quality": None, "generation": None}},
     ) is False
     assert should_reject({"file": "k.jpg", "quality": {"keeper_score": 3.0, "issues": []}}, 7.0) is None
+    gen_meta = {"thresholds": {"ai": None, "quality": None, "generation": 7.0}}
+    assert should_reject(
+        {"file": "octo.jpg", "generation": {"success_score": 8.5, "issues": [], "reasoning": ""}},
+        7.0,
+        gen_meta,
+    ) is False
+    assert should_reject(
+        {"file": "trex.jpg", "generation": {"success_score": 4.0, "issues": ["extra_limbs"], "reasoning": ""}},
+        7.0,
+        gen_meta,
+    ) is True
+    ai_fun = resolve_audit_config(
+        profile="ai-fun", checks=None, threshold=7.0,
+        threshold_ai=None, threshold_quality=None, threshold_generation=None,
+    )
+    assert ai_fun.profile == "ai-fun" and ai_fun.lenses == ("generation",)
+    validate_audit_config(ai_fun)
     assert effective_thresholds({"threshold": 8.0, "thresholds": {"ai": None, "quality": 6.0, "generation": None}}, 7.0)["ai"] == 8.0
     assert multi_dimensional_active({"ai": 7.0, "quality": 6.0, "generation": None}) is True
     assert multi_dimensional_active({"ai": 7.0, "quality": None, "generation": None}) is False
@@ -783,6 +868,7 @@ def _self_check():
     )
     assert "ai" in multi_entry and "analysis" not in multi_entry
     assert score_sort_key({"file": "z.jpg", "quality": {"keeper_score": 9.0}})[0] == -9.0
+    assert score_sort_key({"file": "g.jpg", "generation": {"success_score": 9.0}})[0] == -9.0
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         json.dump([{"file": "x.jpg", "analysis": {"realism_score": 5.0}}], f)
@@ -800,6 +886,8 @@ def _self_check():
     assert scaled_dimensions(2, 1, 1) == (1, 1)
     assert "reasoning" not in RealismAnalysisFast.model_json_schema()["properties"]
     assert "reasoning" in RealismAnalysis.model_json_schema()["properties"]
+    assert "reasoning" not in GenerationVerdictFast.model_json_schema()["properties"]
+    assert "reasoning" in GenerationVerdict.model_json_schema()["properties"]
     from PIL import Image
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "big.png"
@@ -834,6 +922,71 @@ def _self_check():
     assert len(seen) == 8 and len(set(seen)) == 8
     _check_process_image_error_handling()
     _check_run_audit_progress_tags()
+    _check_generation_profile_audit()
+
+
+def _check_generation_profile_audit():
+    import io
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        input_dir = Path(tmp) / "photos"
+        filter_dir = Path(tmp) / "rejects"
+        input_dir.mkdir()
+        for name in ("octo-rex.png", "six-finger-trex.png", "fail.png"):
+            (input_dir / name).write_bytes(b"x")
+
+        def mock_generation(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+            if img_path.name == "fail.png":
+                raise RuntimeError("boom")
+            if img_path.name == "six-finger-trex.png":
+                return {"success_score": 3.0, "issues": ["extra_limbs"], "reasoning": "six fingers"}
+            return {"success_score": 8.5, "issues": [], "reasoning": "coherent mashup"}
+
+        config = resolve_audit_config(
+            profile="ai-fun", checks=None, threshold=7.0,
+            threshold_ai=None, threshold_quality=None, threshold_generation=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "analyze_generation", side_effect=mock_generation), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            for img in sorted(input_dir.iterdir()):
+                process_image(
+                    img, "llava", config, 7.0, True, filter_dir, 512, False,
+                    threading.Lock(), threading.Lock(), ScanProgress(3),
+                )
+
+        out = captured.getvalue()
+        assert "Success: 8.5" in out
+        assert "Success: 3.0" in out
+        assert "Error processing fail.png" in out
+
+        args = argparse.Namespace(
+            model="llava",
+            threshold=7.0,
+            threshold_ai=None,
+            threshold_quality=None,
+            threshold_generation=None,
+            profile="ai-fun",
+            checks=None,
+            dry_run=True,
+            max_dimension=512,
+            fast=False,
+            report_path_display=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_generation", side_effect=mock_generation), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            run_audit(args, input_dir, filter_dir)
+
+        meta, results = load_report(input_dir / DEFAULT_REPORT_NAME)
+        assert meta["profile"] == "ai-fun"
+        assert meta["max_dimension"] == 512
+        by_file = {r["file"]: r for r in results}
+        assert by_file["octo-rex.png"]["generation"]["success_score"] == 8.5
+        assert by_file["six-finger-trex.png"]["generation"]["success_score"] == 3.0
+        assert by_file["fail.png"]["status"] == "error"
 
 
 def _check_process_image_error_handling():
