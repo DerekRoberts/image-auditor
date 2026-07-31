@@ -58,6 +58,46 @@ image-auditor ~/Downloads --apply-report --threshold 7.5
 image-auditor ~/Downloads --model llava --threshold 8.0
 ```
 
+### Audit profiles (`--profile`)
+
+Profiles select which analysis lenses run and set default thresholds. Without `--profile`, behavior is unchanged: single AI realism score, legacy `analysis` block in the report, no `meta.profile`.
+
+| Profile | Question | Lenses | Status |
+| --- | --- | --- | --- |
+| `mixed` (recommended for unknown folders) | What is this and should I keep it? | `ai` (+ `hygiene`, `quality` when #3/#19 land) | **AI lens working** |
+| `ai-fun` | Is this render successful / worth keeping? | `generation` (+ optional `hygiene`) | Generation lens pending (#18) |
+| `photos` | Is this a keeper real photo? | `quality` + `hygiene` | Quality lens pending (#19) |
+
+**Mixed folder (fully working today):**
+```bash
+image-auditor ~/Downloads --profile mixed --dry-run
+image-auditor ~/Downloads --profile mixed --threshold 7.5
+```
+
+Reports use the multi-dimensional layout: `meta.profile`, `meta.thresholds`, and per-file `ai` blocks (not legacy `analysis`).
+
+**AI art folder (exits until generation lens ships):**
+```bash
+image-auditor ~/AI-Art --profile ai-fun --dry-run
+# → clear error: generation lens not implemented yet (see #18)
+```
+
+**Camera roll / Takeout (exits until quality lens ships):**
+```bash
+image-auditor ~/Pictures --profile photos --dry-run
+# → clear error: quality lens not implemented yet (see #19)
+```
+
+Override the profile’s lens set (still validates implementation):
+```bash
+image-auditor ~/Downloads --profile mixed --checks ai --dry-run
+```
+
+Per-dimension threshold overrides (defaults come from the profile):
+```bash
+image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 --dry-run
+```
+
 ---
 
 ## CLI Options
@@ -67,7 +107,12 @@ image-auditor ~/Downloads --model llava --threshold 8.0
 | `directory` | `.` | Target input directory containing images (`.png`, `.jpg`, `.jpeg`, `.webp`) |
 | `--filter-dir` | `<input_dir>/rejects` | Directory to move filtered-out/rejected files into |
 | `--model` | `llava` | Local vision model to query via Ollama |
-| `--threshold` | `7.0` (dry-run only) | Minimum score (1.0 to 10.0) required to keep image in-place; **required** when not using `--dry-run` |
+| `--threshold` | `7.0` (dry-run only) | Minimum score for the profile’s primary lens, or AI realism when no `--profile`; with `--profile`, profile default applies if omitted |
+| `--threshold-ai` | — | Override AI realism cutoff (1.0 to 10.0) |
+| `--threshold-quality` | — | Override quality keeper cutoff (1.0 to 10.0) |
+| `--threshold-generation` | — | Override generation success cutoff (1.0 to 10.0) |
+| `--profile` | — | `mixed`, `ai-fun`, or `photos`; omit for legacy single-score mode |
+| `--checks` | — | Comma-separated lenses overriding the profile set (`hygiene`, `ai`, `quality`, `generation`) |
 | `--dry-run` | `False` | Generate report without moving files |
 | `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
@@ -152,9 +197,9 @@ Current audits emit one `analysis` block per file plus legacy `meta.threshold`. 
 
 Each result may include an optional `keep` field (`true` = never move, `false` = always move). Failed entries require `keep` before apply will move them. Legacy bare-array reports are still accepted on read.
 
-### Multi-dimensional layout (profiles)
+### Multi-dimensional layout (`--profile`)
 
-When multiple audit lenses are active (future `--profile` support), each result carries **only the populated dimension blocks** — no empty placeholders. `meta.profile` names the active profile; `meta.thresholds` holds per-dimension cutoffs (`null` = lens inactive).
+With `--profile`, each result carries **only the populated dimension blocks** — no empty placeholders. `meta.profile` names the active profile; `meta.thresholds` holds per-dimension cutoffs (`null` = lens inactive for this run).
 
 | Block | Purpose | Key fields |
 | --- | --- | --- |
@@ -162,6 +207,37 @@ When multiple audit lenses are active (future `--profile` support), each result 
 | `ai` | Photorealism / AI-artifact detection | `realism_score`, `issues[]`, `reasoning` |
 | `quality` | Real-photo keeper scoring (blur, exposure, framing) | `keeper_score`, `issues[]`, `reasoning` |
 | `generation` | AI-art success (subject landed, not melted) | `success_score`, `issues[]`, `reasoning` |
+
+```json
+{
+  "meta": {
+    "profile": "mixed",
+    "threshold": 7.0,
+    "thresholds": { "ai": 7.0, "quality": 6.0, "generation": null },
+    "model": "llava",
+    "max_dimension": 0,
+    "fast": false,
+    "generated_at": "2026-07-29T12:00:00+00:00",
+    "dry_run": true
+  },
+  "results": [
+    {
+      "file": "beach_portrait.jpg",
+      "ai": {
+        "realism_score": 8.5,
+        "is_realistic": true,
+        "issues": [
+          "AI-generated background texture",
+          "Overly uniform skin smoothness"
+        ],
+        "reasoning": "The image features realistic lighting and natural human posture."
+      }
+    }
+  ]
+}
+```
+
+Example with multiple lenses once hygiene/quality/generation ship (`ai-fun` / `photos`):
 
 ```json
 {

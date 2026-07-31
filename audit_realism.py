@@ -21,6 +21,45 @@ DEFAULT_REPORT_NAME = "realism_audit_report.json"
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
+PROFILE_NAMES = ("mixed", "ai-fun", "photos")
+IMPLEMENTED_LENSES = frozenset({"ai"})
+LENS_ISSUE = {"generation": "#18", "quality": "#19", "hygiene": "#3"}
+
+
+class AuditConfig:
+    """Resolved profile, active lenses, and per-dimension thresholds."""
+
+    __slots__ = ("profile", "lenses", "thresholds", "multi_dimensional")
+
+    def __init__(
+        self,
+        *,
+        profile: str | None,
+        lenses: tuple[str, ...],
+        thresholds: dict[str, float | None],
+    ):
+        self.profile = profile
+        self.lenses = lenses
+        self.thresholds = thresholds
+        self.multi_dimensional = profile is not None
+
+
+PROFILE_DEFAULTS: dict[str, dict] = {
+    "mixed": {
+        "lenses": ("ai",),
+        "thresholds": {"ai": 7.0, "quality": 6.0, "generation": None},
+    },
+    "ai-fun": {
+        "lenses": ("generation",),
+        "thresholds": {"ai": None, "quality": None, "generation": 7.0},
+    },
+    "photos": {
+        "lenses": ("quality",),
+        "thresholds": {"ai": None, "quality": 6.0, "generation": None},
+    },
+}
+
+PROFILE_PRIMARY_THRESHOLD = {"mixed": "ai", "ai-fun": "generation", "photos": "quality"}
 
 
 class ScanProgress:
@@ -76,6 +115,78 @@ class GenerationVerdict(BaseModel):
 
 def default_thresholds(threshold: float) -> dict[str, float | None]:
     return {"ai": threshold, "quality": None, "generation": None}
+
+
+def empty_thresholds() -> dict[str, float | None]:
+    return {"ai": None, "quality": None, "generation": None}
+
+
+def parse_checks(raw: str | None) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    lenses = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if not lenses:
+        raise ValueError("--checks requires at least one lens name")
+    unknown = [l for l in lenses if l not in DIMENSION_BLOCKS]
+    if unknown:
+        raise ValueError(f"unknown lens(es): {', '.join(unknown)}")
+    return lenses
+
+
+def resolve_audit_config(
+    *,
+    profile: str | None,
+    checks: tuple[str, ...] | None,
+    threshold: float,
+    threshold_ai: float | None,
+    threshold_quality: float | None,
+    threshold_generation: float | None,
+) -> AuditConfig:
+    if profile is None:
+        thresholds = default_thresholds(threshold)
+        if threshold_ai is not None:
+            thresholds["ai"] = threshold_ai
+        if threshold_quality is not None:
+            thresholds["quality"] = threshold_quality
+        if threshold_generation is not None:
+            thresholds["generation"] = threshold_generation
+        return AuditConfig(profile=None, lenses=("ai",), thresholds=thresholds)
+
+    defaults = PROFILE_DEFAULTS[profile]
+    lenses = checks if checks is not None else defaults["lenses"]
+    thresholds = dict(empty_thresholds())
+    for dim, value in defaults["thresholds"].items():
+        if value is not None:
+            thresholds[dim] = value
+
+    primary = PROFILE_PRIMARY_THRESHOLD[profile]
+    thresholds[primary] = threshold
+
+    if threshold_ai is not None:
+        thresholds["ai"] = threshold_ai
+    if threshold_quality is not None:
+        thresholds["quality"] = threshold_quality
+    if threshold_generation is not None:
+        thresholds["generation"] = threshold_generation
+
+    return AuditConfig(profile=profile, lenses=lenses, thresholds=thresholds)
+
+
+def validate_audit_config(config: AuditConfig) -> None:
+    missing = [l for l in config.lenses if l not in IMPLEMENTED_LENSES]
+    if not missing:
+        return
+    parts = []
+    for lens in missing:
+        issue = LENS_ISSUE.get(lens, "open issue")
+        parts.append(f"  - {lens}: not implemented yet (see {issue})")
+    profile_note = f" (profile={config.profile})" if config.profile else ""
+    raise SystemExit(
+        "Cannot run audit: requested lens(es) are not implemented"
+        f"{profile_note}:\n"
+        + "\n".join(parts)
+        + "\nUse --profile mixed for AI realism scoring, or --checks to override lenses."
+    )
 
 
 def effective_thresholds(meta: dict | None, cli_threshold: float) -> dict[str, float | None]:
@@ -185,7 +296,42 @@ def parse_args():
         "--threshold",
         type=float,
         default=None,
-        help="Minimum realism score (1.0 to 10.0) to keep image in-place; required unless --dry-run",
+        help="Minimum score (1.0 to 10.0) for the profile's primary lens, or AI realism when no --profile; "
+        "required unless --dry-run or --profile supplies a default",
+    )
+    parser.add_argument(
+        "--threshold-ai",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Override AI realism cutoff (1.0 to 10.0)",
+    )
+    parser.add_argument(
+        "--threshold-quality",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Override quality keeper cutoff (1.0 to 10.0)",
+    )
+    parser.add_argument(
+        "--threshold-generation",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Override generation success cutoff (1.0 to 10.0)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=PROFILE_NAMES,
+        default=None,
+        help="Audit profile: mixed (AI realism), ai-fun (generation), photos (quality); "
+        "default: legacy single-score AI mode (no meta.profile)",
+    )
+    parser.add_argument(
+        "--checks",
+        default=None,
+        metavar="LENSES",
+        help="Comma-separated lenses overriding the profile set (hygiene, ai, quality, generation)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Generate the JSON report without physically moving files into filter_dir")
     parser.add_argument(
@@ -214,14 +360,36 @@ def parse_args():
     if args.apply_report is not None and args.dry_run:
         parser.error("--apply-report cannot be used with --dry-run")
 
+    try:
+        args.checks = parse_checks(args.checks)
+    except ValueError as e:
+        parser.error(str(e))
+
+    if args.profile is None and args.checks is not None:
+        parser.error("--checks requires --profile")
+
     if args.dry_run:
         if args.threshold is None:
-            args.threshold = DEFAULT_THRESHOLD
+            if args.profile is not None:
+                primary = PROFILE_PRIMARY_THRESHOLD[args.profile]
+                args.threshold = PROFILE_DEFAULTS[args.profile]["thresholds"][primary]
+            else:
+                args.threshold = DEFAULT_THRESHOLD
     elif args.threshold is None:
-        parser.error("--threshold is required when not using --dry-run")
+        if args.profile is not None:
+            primary = PROFILE_PRIMARY_THRESHOLD[args.profile]
+            args.threshold = PROFILE_DEFAULTS[args.profile]["thresholds"][primary]
+        else:
+            parser.error("--threshold is required when not using --dry-run")
 
-    if not (1.0 <= args.threshold <= 10.0) or math.isnan(args.threshold):
-        parser.error(f"--threshold must be between 1.0 and 10.0, got {args.threshold}")
+    for name, value in (
+        ("--threshold", args.threshold),
+        ("--threshold-ai", args.threshold_ai),
+        ("--threshold-quality", args.threshold_quality),
+        ("--threshold-generation", args.threshold_generation),
+    ):
+        if value is not None and (not (1.0 <= value <= 10.0) or math.isnan(value)):
+            parser.error(f"{name} must be between 1.0 and 10.0, got {value}")
     if args.max_dimension < 0:
         parser.error(f"--max-dimension must be >= 0, got {args.max_dimension}")
     return args
@@ -394,7 +562,8 @@ def ensure_model(model_name: str):
 def process_image(
     img_path: Path,
     model_name: str,
-    threshold: float,
+    config: AuditConfig,
+    cli_threshold: float,
     dry_run: bool,
     filter_dir: Path,
     max_dimension: int,
@@ -407,22 +576,41 @@ def process_image(
 
     with print_lock:
         print(f"{tag}Analyzing {img_path.name}...")
+
+    blocks: dict[str, dict] = {}
     try:
-        analysis_dict = analyze_image(img_path, model_name, max_dimension, fast)
-        analysis = RealismAnalysis(**analysis_dict)
+        if "ai" in config.lenses:
+            analysis_dict = analyze_image(img_path, model_name, max_dimension, fast)
+            analysis = RealismAnalysis(**analysis_dict)
+            blocks["ai"] = analysis_to_ai_block(analysis_dict)
+            with print_lock:
+                print(f"{tag}  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
     except Exception as e:
         with print_lock:
             traceback.print_exc()
             print(f"{tag}Error processing {img_path.name}: {e}")
         return {"file": img_path.name, "status": "error", "error": str(e)}
 
-    with print_lock:
-        print(f"{tag}  Score: {analysis.realism_score} - Realistic: {analysis.is_realistic}")
-
-    result = realism_result_entry(img_path.name, analysis_dict)
+    if config.multi_dimensional:
+        result = result_entry_from_lenses(img_path.name, **blocks)
+    elif blocks.get("ai") is not None:
+        # Legacy single-score: rebuild analysis dict from ai block for compat
+        ai = blocks["ai"]
+        result = realism_result_entry(
+            img_path.name,
+            {
+                "realism_score": ai["realism_score"],
+                "is_realistic": ai.get("is_realistic", False),
+                "detected_artifacts": ai.get("issues", []),
+                "reasoning": ai.get("reasoning", ""),
+            },
+        )
+    else:
+        result = {"file": img_path.name}
 
     if not dry_run:
-        if should_reject(result, threshold):
+        meta = {"threshold": cli_threshold, "thresholds": config.thresholds}
+        if should_reject(result, cli_threshold, meta):
             try:
                 dest = move_reject(img_path, filter_dir, move_lock)
                 with print_lock:
@@ -474,6 +662,16 @@ def analyze_image(img_path: Path, model_name: str, max_dimension: int = 0, fast:
 
 
 def run_audit(args, input_dir: Path, filter_dir: Path):
+    config = resolve_audit_config(
+        profile=args.profile,
+        checks=args.checks,
+        threshold=args.threshold,
+        threshold_ai=args.threshold_ai,
+        threshold_quality=args.threshold_quality,
+        threshold_generation=args.threshold_generation,
+    )
+    validate_audit_config(config)
+
     ensure_model(args.model)
 
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()]
@@ -482,10 +680,14 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
     move_lock = threading.Lock()
     progress = ScanProgress(len(image_paths)) if image_paths else None
 
+    if config.profile:
+        print(f"Profile: {config.profile} (lenses: {', '.join(config.lenses)})")
+
     def process(img_path: Path) -> dict:
         return process_image(
             img_path,
             args.model,
+            config,
             args.threshold,
             args.dry_run,
             filter_dir,
@@ -509,6 +711,8 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
             max_dimension=args.max_dimension,
             fast=args.fast,
             dry_run=args.dry_run,
+            profile=config.profile,
+            thresholds=config.thresholds,
         )
         write_report(report_path, meta, results)
         display_report_path = args.report_path_display or str(report_path)
@@ -540,6 +744,24 @@ def _self_check():
     assert effective_thresholds({"threshold": 8.0, "thresholds": {"ai": None, "quality": 6.0, "generation": None}}, 7.0)["ai"] == 8.0
     assert multi_dimensional_active({"ai": 7.0, "quality": 6.0, "generation": None}) is True
     assert multi_dimensional_active({"ai": 7.0, "quality": None, "generation": None}) is False
+    mixed = resolve_audit_config(profile="mixed", checks=None, threshold=7.5, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    assert mixed.profile == "mixed" and mixed.lenses == ("ai",) and mixed.multi_dimensional
+    assert mixed.thresholds["ai"] == 7.5 and mixed.thresholds["quality"] == 6.0
+    legacy = resolve_audit_config(profile=None, checks=None, threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    assert legacy.profile is None and not legacy.multi_dimensional and legacy.thresholds["ai"] == 8.0
+    assert parse_checks("hygiene,ai") == ("hygiene", "ai")
+    try:
+        parse_checks("")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for empty --checks")
+    try:
+        validate_audit_config(resolve_audit_config(profile="photos", checks=None, threshold=6.0, threshold_ai=None, threshold_quality=None, threshold_generation=None))
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("photos profile should fail validation")
     ai_block = analysis_to_ai_block(
         {"realism_score": 8.0, "is_realistic": True, "detected_artifacts": ["x"], "reasoning": "ok"}
     )
@@ -613,6 +835,10 @@ def _check_process_image_error_handling():
     from unittest.mock import patch
 
     mod = sys.modules[__name__]
+    legacy = resolve_audit_config(
+        profile=None, checks=None, threshold=7.0,
+        threshold_ai=None, threshold_quality=None, threshold_generation=None,
+    )
     with tempfile.TemporaryDirectory() as tmp:
         img = Path(tmp) / "x.jpg"
         img.write_bytes(b"x")
@@ -620,7 +846,7 @@ def _check_process_image_error_handling():
         out = io.StringIO()
         with patch.object(mod, "analyze_image", side_effect=RuntimeError("unexpected")), redirect_stderr(err), redirect_stdout(out):
             result = process_image(
-                img, "llava", 7.0, True, Path(tmp) / "rejects", 0, False,
+                img, "llava", legacy, 7.0, True, Path(tmp) / "rejects", 0, False,
                 threading.Lock(), threading.Lock(), ScanProgress(2),
             )
         assert result == {"file": "x.jpg", "status": "error", "error": "unexpected"}
@@ -658,6 +884,11 @@ def _check_run_audit_progress_tags():
         args = argparse.Namespace(
             model="llava",
             threshold=7.0,
+            threshold_ai=None,
+            threshold_quality=None,
+            threshold_generation=None,
+            profile=None,
+            checks=None,
             dry_run=False,
             max_dimension=0,
             fast=False,
