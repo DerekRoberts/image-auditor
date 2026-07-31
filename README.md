@@ -149,7 +149,7 @@ image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.
 
 **Full mode (default)** asks the model for forensic reasoning alongside score, realism flag, and artifact tags. Use this for dry-runs, borderline decisions, and any run where you will read the JSON report before moving files.
 
-**Fast mode** (`--fast`) uses a reduced prompt and schema — score and artifact tags only, no model reasoning. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Works for `ai` (realism), `generation` (success), and `quality` (keeper) lenses. Expect roughly 10–20% faster per image, with larger gains on verbose models.
+**Fast mode** (`--fast`) uses a reduced prompt and schema — score and artifact tags only, no model reasoning. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Works for `ai` (realism), `generation` (success), and `quality` (keeper) lenses. Speed gains depend on the model, image size, and hardware.
 
 **When to use `--fast`:**
 

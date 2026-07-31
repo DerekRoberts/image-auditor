@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -13,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ollama
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
@@ -24,6 +25,7 @@ SCORED_DIMENSIONS = ("ai", "quality", "generation")
 PROFILE_NAMES = ("mixed", "ai-fun", "photos")
 IMPLEMENTED_LENSES = frozenset({"ai", "generation", "quality"})
 LENS_ISSUE = {"generation": "#18", "quality": "#19", "hygiene": "#3"}
+_ISSUE_TAG = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 
 
 class AuditConfig:
@@ -101,15 +103,32 @@ class AiVerdict(BaseModel):
     reasoning: str = ""
 
 
-class QualityVerdict(BaseModel):
-    keeper_score: float
+class _QualityVerdictCore(BaseModel):
+    keeper_score: float = Field(ge=1.0, le=10.0)
     issues: list[str] = []
+
+    @field_validator("keeper_score")
+    @classmethod
+    def keeper_score_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("keeper_score must be finite")
+        return v
+
+    @field_validator("issues")
+    @classmethod
+    def issues_snake_case(cls, v: list[str]) -> list[str]:
+        bad = [t for t in v if not _ISSUE_TAG.match(t)]
+        if bad:
+            raise ValueError(f"issues must be snake_case tags, got: {bad}")
+        return v
+
+
+class QualityVerdict(_QualityVerdictCore):
     reasoning: str = ""
 
 
-class QualityVerdictFast(BaseModel):
-    keeper_score: float
-    issues: list[str] = []
+class QualityVerdictFast(_QualityVerdictCore):
+    pass
 
 
 class GenerationVerdict(BaseModel):
@@ -677,7 +696,8 @@ def analyze_quality(img_path: Path, model_name: str, max_dimension: int = 0, fas
             "Score this real photograph for album keeper quality (1.0-10.0). "
             "Would someone keep this in a photo album? Focus on blur, exposure, "
             "framing accidents, and screenshots — NOT whether the image is AI-generated. "
-            "Return keeper_score and issues only. Do not explain."
+            "List issues as short snake_case tags (e.g. motion_blur, underexposed, "
+            "eyes_closed, screenshot). Return keeper_score and issues only. Do not explain."
         )
         schema = QualityVerdictFast.model_json_schema()
     else:
@@ -995,6 +1015,58 @@ def _self_check():
     _check_run_audit_progress_tags()
     _check_generation_profile_audit()
     _check_quality_profile_audit()
+    _check_quality_score_bounds()
+    _check_quality_fast_issue_validation()
+
+
+def _check_quality_score_bounds():
+    from pydantic import ValidationError
+
+    QualityVerdict(keeper_score=1.0, issues=[], reasoning="")
+    QualityVerdict(keeper_score=10.0, issues=[], reasoning="")
+    QualityVerdictFast(keeper_score=1.0, issues=[])
+    QualityVerdictFast(keeper_score=10.0, issues=[])
+
+    for bad in (0.9, 10.1, float("nan"), float("inf"), float("-inf")):
+        for model, extra in ((QualityVerdict, {"reasoning": ""}), (QualityVerdictFast, {})):
+            try:
+                model(keeper_score=bad, issues=[], **extra)
+                raise AssertionError(f"expected ValidationError for keeper_score={bad!r} in {model.__name__}")
+            except ValidationError:
+                pass
+
+
+def _check_quality_fast_issue_validation():
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from pydantic import ValidationError
+
+    QualityVerdictFast(keeper_score=5.0, issues=["motion_blur", "underexposed"])
+    try:
+        QualityVerdictFast(keeper_score=5.0, issues=["Heavy motion blur"])
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("expected ValidationError for natural-language issue tag")
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        img = Path(tmp) / "blur.jpg"
+        img.write_bytes(b"x")
+        mock_response = MagicMock()
+        mock_response.message.content = json.dumps({
+            "keeper_score": 4.0,
+            "issues": ["very blurry image"],
+        })
+        with patch.object(mod, "prepare_analysis_image", return_value=(img, None)), patch(
+            "ollama.chat", return_value=mock_response
+        ):
+            try:
+                analyze_quality(img, "llava", fast=True)
+                raise AssertionError("expected ValidationError for natural-language fast issues")
+            except ValidationError:
+                pass
 
 
 def _check_quality_profile_audit():
