@@ -4,8 +4,6 @@ A local CLI tool for culling, deduplicating, and sorting photo collections and A
 
 Evaluates image quality, detects generation artifacts and defects (e.g. plastic skin, warped fingers, lighting errors), scores quality from 1.0 to 10.0, and automatically filters unwanted photos into a target directory while preserving keepers in-place.
 
-> **Note:** Formerly [image-auditor](https://github.com/DerekRoberts/image-auditor). After the GitHub repo rename, update your remote: `git remote set-url origin git@github.com:DerekRoberts/image-cull.git`
-
 ---
 
 ## Features
@@ -50,7 +48,7 @@ image-cull ~/Downloads --dry-run
 ```
 
 ### Apply moves from a reviewed report (no Ollama)
-After reviewing or hand-editing `cull_report.json`:
+After reviewing or hand-editing `cull-report.json`:
 ```bash
 image-cull ~/Downloads --apply-report --threshold 7.5
 ```
@@ -143,7 +141,7 @@ image-cull ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 -
 | `--profile` | — | `mixed`, `ai-fun`, or `photos`; omit for legacy single-score mode |
 | `--checks` | — | Comma-separated lenses overriding the profile set (`hygiene`, `ai`, `quality`, `generation`) |
 | `--dry-run` | `False` | Generate report without moving files |
-| `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: `<input_dir>/cull_report.json`; falls back to legacy `realism_audit_report.json`) |
+| `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: `<input_dir>/cull-report.json`) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
 | `--fast` | `False` | Minimal VLM output (score, flag, artifacts only); skips reasoning for faster bulk triage |
 
@@ -184,11 +182,7 @@ If you do enable it, dry-run both ways on a sample folder and compare scores bef
 
 ---
 
-## Sample JSON Cull Report (`cull_report.json`)
-
-### Report filename migration
-
-New runs write `cull_report.json` in the input directory. **`--apply-report` without a path** accepts the legacy `realism_audit_report.json` if the new filename is missing (compat window: at least one release).
+## Sample JSON Cull Report (`cull-report.json`)
 
 ### Single-score mode (default)
 

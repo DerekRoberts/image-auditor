@@ -18,8 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
-DEFAULT_REPORT_NAME = "cull_report.json"
-LEGACY_REPORT_NAME = "realism_audit_report.json"
+DEFAULT_REPORT_NAME = "cull-report.json"
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
@@ -376,8 +375,7 @@ def parse_args():
         const="__default__",
         default=None,
         metavar="PATH",
-        help="Apply file moves from a cull report without re-analyzing (default: <input_dir>/cull_report.json; "
-        "falls back to legacy realism_audit_report.json)",
+        help="Apply file moves from a cull report without re-analyzing (default: <input_dir>/cull-report.json)",
     )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
     parser.add_argument(
@@ -430,17 +428,6 @@ def parse_args():
     if args.max_dimension < 0:
         parser.error(f"--max-dimension must be >= 0, got {args.max_dimension}")
     return args
-
-
-def resolve_default_report_path(input_dir: Path) -> Path:
-    """Return default --apply-report path; fall back to legacy filename if primary is absent."""
-    primary = input_dir / DEFAULT_REPORT_NAME
-    if primary.is_file():
-        return primary
-    legacy = input_dir / LEGACY_REPORT_NAME
-    if legacy.is_file():
-        return legacy
-    return primary
 
 
 def load_report(path: Path) -> tuple[dict | None, list]:
@@ -1024,15 +1011,6 @@ def _self_check():
     for t in threads:
         t.join()
     assert len(seen) == 8 and len(set(seen)) == 8
-    assert resolve_default_report_path(Path("/nonexistent")) == Path("/nonexistent") / DEFAULT_REPORT_NAME
-    with tempfile.TemporaryDirectory() as tmp:
-        input_dir = Path(tmp)
-        legacy = input_dir / LEGACY_REPORT_NAME
-        legacy.write_text('{"meta": {}, "results": []}')
-        assert resolve_default_report_path(input_dir) == legacy
-        primary = input_dir / DEFAULT_REPORT_NAME
-        primary.write_text('{"meta": {}, "results": []}')
-        assert resolve_default_report_path(input_dir) == primary
     _check_process_image_error_handling()
     _check_run_cull_progress_tags()
     _check_generation_profile_cull()
@@ -1323,11 +1301,7 @@ def main():
     filter_dir = Path(args.filter_dir) if args.filter_dir else input_dir / "rejects"
 
     if args.apply_report is not None:
-        report_path = (
-            resolve_default_report_path(input_dir)
-            if args.apply_report == "__default__"
-            else Path(args.apply_report)
-        )
+        report_path = input_dir / DEFAULT_REPORT_NAME if args.apply_report == "__default__" else Path(args.apply_report)
         if not report_path.is_file():
             raise SystemExit(f"Error: Report file '{report_path}' does not exist.")
         apply_from_report(report_path, input_dir, filter_dir, args.threshold)

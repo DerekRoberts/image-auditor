@@ -9,8 +9,7 @@ __pycache__/
 *$py.class
 
 # Cull Outputs & Temporary Files
-cull_report.json
-realism_audit_report.json
+cull-report.json
 keepers/
 rejects/
 photos/

@@ -82,7 +82,7 @@ fi
 
 exec $CONTAINER_ENGINE run --rm --network host \
     "${MOUNTS[@]}" \
-    image-cull:latest --dir /photos --report-path-display "$REAL_HOST_DIR/cull_report.json" "${CONTAINER_FLAGS[@]}" "${ARGS[@]}"
+    image-cull:latest --dir /photos --report-path-display "$REAL_HOST_DIR/cull-report.json" "${CONTAINER_FLAGS[@]}" "${ARGS[@]}"
 EOF
 
 chmod +x "$BIN_PATH"
