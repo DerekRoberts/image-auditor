@@ -66,7 +66,7 @@ Profiles select which analysis lenses run and set default thresholds. Without `-
 | --- | --- | --- | --- |
 | `mixed` (recommended for unknown folders) | What is this and should I keep it? | `ai` (+ `hygiene`, `quality` when #3/#19 land) | **AI lens working** |
 | `ai-fun` | Is this render successful / worth keeping? | `generation` (+ optional `hygiene`) | Generation lens pending (#18) |
-| `photos` | Is this a keeper real photo? | `quality` + `hygiene` | Quality lens pending (#19) |
+| `photos` | Is this a keeper real photo? | `quality` (+ optional `hygiene` when #3 lands) | Quality lens pending (#19) |
 
 **Mixed folder (fully working today):**
 ```bash

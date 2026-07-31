@@ -155,12 +155,18 @@ def resolve_audit_config(
     defaults = PROFILE_DEFAULTS[profile]
     lenses = checks if checks is not None else defaults["lenses"]
     thresholds = dict(empty_thresholds())
-    for dim, value in defaults["thresholds"].items():
-        if value is not None:
-            thresholds[dim] = value
 
-    primary = PROFILE_PRIMARY_THRESHOLD[profile]
-    thresholds[primary] = threshold
+    if checks is None:
+        for dim, value in defaults["thresholds"].items():
+            if value is not None:
+                thresholds[dim] = value
+        primary = PROFILE_PRIMARY_THRESHOLD[profile]
+        if primary in lenses:
+            thresholds[primary] = threshold
+    else:
+        scored_active = [l for l in lenses if l in SCORED_DIMENSIONS]
+        if scored_active:
+            thresholds[scored_active[0]] = threshold
 
     if threshold_ai is not None:
         thresholds["ai"] = threshold_ai
@@ -747,6 +753,8 @@ def _self_check():
     mixed = resolve_audit_config(profile="mixed", checks=None, threshold=7.5, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert mixed.profile == "mixed" and mixed.lenses == ("ai",) and mixed.multi_dimensional
     assert mixed.thresholds["ai"] == 7.5 and mixed.thresholds["quality"] == 6.0
+    photos_ai = resolve_audit_config(profile="photos", checks=("ai",), threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    assert photos_ai.thresholds["ai"] == 8.0 and photos_ai.thresholds["quality"] is None
     legacy = resolve_audit_config(profile=None, checks=None, threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert legacy.profile is None and not legacy.multi_dimensional and legacy.thresholds["ai"] == 8.0
     assert parse_checks("hygiene,ai") == ("hygiene", "ai")
