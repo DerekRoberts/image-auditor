@@ -48,10 +48,14 @@ image-cull ~/Downloads --dry-run
 ```
 
 ### Apply moves from a reviewed report (no Ollama)
-After reviewing or hand-editing `cull-report.json`:
+After reviewing or hand-editing `cull-report.json` (legacy names `cull_report.json`, `realism_audit_report.json` also work):
 ```bash
+image-cull ~/Downloads --apply-report
 image-cull ~/Downloads --apply-report --threshold 7.5
+image-cull ~/Downloads --apply-report --threshold-quality 6.0 --threshold-ai 7.5
 ```
+
+Apply reads cutoffs from `meta.thresholds`; CLI flags override. Rejects when **any populated dimension** with an active threshold fails. Logs the reason per file.
 
 ### Specify custom vision model
 ```bash
@@ -141,7 +145,7 @@ image-cull ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 -
 | `--profile` | — | `mixed`, `ai-fun`, or `photos`; omit for legacy single-score mode |
 | `--checks` | — | Comma-separated lenses overriding the profile set (`hygiene`, `ai`, `quality`, `generation`) |
 | `--dry-run` | `False` | Generate report without moving files |
-| `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: `<input_dir>/cull-report.json`) |
+| `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: first of `cull-report.json`, `cull_report.json`, `realism_audit_report.json` in input dir) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
 | `--fast` | `False` | Minimal VLM output (score, flag, artifacts only); skips reasoning for faster bulk triage |
 
@@ -304,7 +308,7 @@ Example with multiple lenses once hygiene/quality/generation ship (`ai-fun` / `p
 }
 ```
 
-**Backward compatibility:** reports with top-level `analysis` / `realism_score` still load and apply using `meta.threshold` (or `meta.thresholds.ai`). Multi-dimensional `ai` and `generation` blocks use per-dimension thresholds from `meta.thresholds`. Composite reject policy across multiple scored lenses is defined in a follow-up issue; until then, `--apply-report` rejects when any scored dimension with an active threshold falls below its cutoff, and honors `hygiene.action` plus `keep` overrides.
+**Backward compatibility:** reports with top-level `analysis` / `realism_score` still load and apply using `meta.threshold` (or `meta.thresholds.ai`). Multi-dimensional blocks use per-dimension thresholds from `meta.thresholds` (CLI overrides win). Composite apply rejects when **any populated dimension** with an active threshold fails; honors `hygiene.action` and `keep` overrides. Apply logs the reject/preserve reason per file.
 
 ---
 

@@ -19,7 +19,9 @@ from pydantic import BaseModel, Field, field_validator
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "cull-report.json"
+LEGACY_REPORT_NAMES = ("cull-report.json", "cull_report.json", "realism_audit_report.json")
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
+SCORE_FIELD = {"ai": "realism_score", "quality": "keeper_score", "generation": "success_score"}
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
 PROFILE_NAMES = ("mixed", "ai-fun", "photos")
@@ -236,6 +238,48 @@ def effective_thresholds(meta: dict | None, cli_threshold: float) -> dict[str, f
     return default_thresholds(legacy)
 
 
+def resolve_apply_thresholds(
+    meta: dict | None,
+    *,
+    threshold: float | None,
+    threshold_ai: float | None,
+    threshold_quality: float | None,
+    threshold_generation: float | None,
+) -> dict[str, float | None]:
+    """Merge meta.thresholds with CLI flags; per-dimension overrides win."""
+    fallback = threshold if threshold is not None else DEFAULT_THRESHOLD
+    thresholds = effective_thresholds(meta, fallback)
+
+    if threshold is not None:
+        active = [d for d in SCORED_DIMENSIONS if thresholds.get(d) is not None]
+        if len(active) == 1:
+            thresholds[active[0]] = threshold
+        else:
+            profile = (meta or {}).get("profile")
+            if profile in PROFILE_PRIMARY_THRESHOLD:
+                thresholds[PROFILE_PRIMARY_THRESHOLD[profile]] = threshold
+            else:
+                thresholds["ai"] = threshold
+
+    if threshold_ai is not None:
+        thresholds["ai"] = threshold_ai
+    if threshold_quality is not None:
+        thresholds["quality"] = threshold_quality
+    if threshold_generation is not None:
+        thresholds["generation"] = threshold_generation
+    return thresholds
+
+
+def resolve_report_path(input_dir: Path, explicit: Path | None) -> Path:
+    if explicit is not None:
+        return explicit
+    for name in LEGACY_REPORT_NAMES:
+        candidate = input_dir / name
+        if candidate.is_file():
+            return candidate
+    return input_dir / DEFAULT_REPORT_NAME
+
+
 def multi_dimensional_active(thresholds: dict[str, float | None]) -> bool:
     return sum(v is not None for v in thresholds.values()) > 1
 
@@ -411,11 +455,13 @@ def parse_args():
             else:
                 args.threshold = DEFAULT_THRESHOLD
     elif args.threshold is None:
-        if args.profile is not None:
+        if args.apply_report is not None:
+            pass  # ponytail: apply reads cutoffs from report meta; CLI overrides optional
+        elif args.profile is not None:
             primary = PROFILE_PRIMARY_THRESHOLD[args.profile]
             args.threshold = PROFILE_DEFAULTS[args.profile]["thresholds"][primary]
         else:
-            parser.error("--threshold is required when not using --dry-run")
+            parser.error("--threshold is required when not using --dry-run or --apply-report")
 
     for name, value in (
         ("--threshold", args.threshold),
@@ -458,24 +504,51 @@ def pipeline_depth(image_count: int) -> int:
     return max(1, min(image_count, MAX_IN_FLIGHT))
 
 
-def should_reject(entry: dict, threshold: float, meta: dict | None = None) -> bool | None:
+def _entry_ai_block(entry: dict) -> dict:
+    block = entry.get("ai")
+    if block:
+        return block
+    return entry.get("analysis") or {}
+
+
+def _format_hygiene_reason(hygiene: dict) -> str:
+    action = hygiene.get("action", "reject")
+    if dupe := hygiene.get("exact_dupe_of"):
+        return f"hygiene: {action} (exact_dupe_of {dupe})"
+    return f"hygiene: {action}"
+
+
+def _format_score_reason(entry: dict, dimension: str, score: float, cutoff: float, *, failed: bool) -> str:
+    block = entry.get(dimension) if dimension != "ai" else _entry_ai_block(entry)
+    issues = block.get("issues") or block.get("detected_artifacts") or []
+    label = SCORE_FIELD[dimension]
+    prefix = f"{issues[0]}, " if issues else ""
+    if failed:
+        return f"{dimension}: {prefix}{label} {score:.1f} < {cutoff:.1f}"
+    return f"{dimension}: {label} {score:.1f}"
+
+
+def evaluate_entry(entry: dict, thresholds: dict[str, float | None]) -> tuple[bool | None, list[str]]:
+    """Return (reject?, reasons). None = skip (error without keep override)."""
     keep = entry.get("keep")
     if keep is True:
-        return False
+        return False, ["keep: true override"]
     if keep is False:
-        return True
+        return True, ["keep: false override"]
     if entry.get("status") == "error":
-        return None
+        return None, []
 
     hygiene = entry.get("hygiene")
     if hygiene:
         action = hygiene.get("action")
+        reason = _format_hygiene_reason(hygiene)
         if action == "reject":
-            return True
+            return True, [reason]
         if action == "keep":
-            return False
+            return False, [reason]
 
-    thresholds = effective_thresholds(meta, threshold)
+    fail_reasons: list[str] = []
+    pass_reasons: list[str] = []
     scored = False
     for dim in SCORED_DIMENSIONS:
         cutoff = thresholds.get(dim)
@@ -483,13 +556,26 @@ def should_reject(entry: dict, threshold: float, meta: dict | None = None) -> bo
             continue
         score = dimension_score(entry, dim)
         if score is None and dim == "ai":
-            score = entry.get("analysis", {}).get("realism_score")
+            score = _entry_ai_block(entry).get("realism_score")
         if score is None:
             continue
         scored = True
         if score < cutoff:
-            return True
-    return False if scored else None
+            fail_reasons.append(_format_score_reason(entry, dim, score, cutoff, failed=True))
+        else:
+            pass_reasons.append(_format_score_reason(entry, dim, score, cutoff, failed=False))
+
+    if fail_reasons:
+        return True, fail_reasons
+    if scored:
+        return False, pass_reasons
+    return None, []
+
+
+def should_reject(entry: dict, threshold: float, meta: dict | None = None) -> bool | None:
+    thresholds = effective_thresholds(meta, threshold)
+    reject, _ = evaluate_entry(entry, thresholds)
+    return reject
 
 
 def unique_reject_path(filter_dir: Path, filename: str) -> Path:
@@ -517,13 +603,32 @@ def move_reject(img_path: Path, filter_dir: Path, move_lock: threading.Lock | No
         return _move()
 
 
-def apply_from_report(report_path: Path, input_dir: Path, filter_dir: Path, threshold: float):
+def apply_from_report(
+    report_path: Path,
+    input_dir: Path,
+    filter_dir: Path,
+    *,
+    threshold: float | None,
+    threshold_ai: float | None,
+    threshold_quality: float | None,
+    threshold_generation: float | None,
+):
     meta, results = load_report(report_path)
+    thresholds = resolve_apply_thresholds(
+        meta,
+        threshold=threshold,
+        threshold_ai=threshold_ai,
+        threshold_quality=threshold_quality,
+        threshold_generation=threshold_generation,
+    )
+    active = [f"{d}={thresholds[d]:.1f}" for d in SCORED_DIMENSIONS if thresholds.get(d) is not None]
+    if active:
+        print(f"Apply thresholds: {', '.join(active)}")
     moved = kept = skipped = 0
 
     for entry in results:
         filename = entry["file"]
-        reject = should_reject(entry, threshold, meta)
+        reject, reasons = evaluate_entry(entry, thresholds)
         if reject is None:
             print(f"Skipping {filename}: error entry without keep override")
             skipped += 1
@@ -535,16 +640,17 @@ def apply_from_report(report_path: Path, input_dir: Path, filter_dir: Path, thre
             skipped += 1
             continue
 
+        reason_text = ", ".join(reasons)
         if reject:
             try:
                 dest = move_reject(src, filter_dir)
-                print(f"  -> Moved filtered image to {dest}")
+                print(f"Moved {filename} → {dest.name} ({reason_text})")
                 moved += 1
             except OSError as e:
-                print(f"  -> Error moving {filename}: {e}")
+                print(f"Error moving {filename}: {e}")
                 skipped += 1
         else:
-            print(f"  -> Preserved keeper in place ({filename})")
+            print(f"Preserved {filename} ({reason_text})")
             kept += 1
 
     print(f"\nApply complete: {moved} moved, {kept} kept, {skipped} skipped.")
@@ -918,6 +1024,91 @@ def _self_check():
         7.0,
         gen_meta,
     ) is True
+    multi_entry = {
+        "file": "both.jpg",
+        "ai": {"realism_score": 8.0, "issues": [], "reasoning": ""},
+        "quality": {"keeper_score": 3.0, "issues": ["motion_blur"], "reasoning": ""},
+    }
+    multi_thresh = {"ai": 7.0, "quality": 6.0, "generation": None}
+    reject, reasons = evaluate_entry(multi_entry, multi_thresh)
+    assert reject is True and any("quality:" in r for r in reasons) and any("motion_blur" in r for r in reasons)
+    reject, reasons = evaluate_entry(
+        {"file": "octo.jpg", "generation": {"success_score": 8.5, "issues": [], "reasoning": ""}},
+        {"ai": None, "quality": None, "generation": 7.0},
+    )
+    assert reject is False and reasons == ["generation: success_score 8.5"]
+    reject, reasons = evaluate_entry(
+        {"file": "x.jpg", "keep": True, "quality": {"keeper_score": 1.0, "issues": []}},
+        {"ai": None, "quality": 6.0, "generation": None},
+    )
+    assert reject is False and reasons == ["keep: true override"]
+    resolved = resolve_apply_thresholds(
+        {"thresholds": {"ai": None, "quality": 6.0, "generation": None}},
+        threshold=7.5,
+        threshold_ai=None,
+        threshold_quality=None,
+        threshold_generation=None,
+    )
+    assert resolved["quality"] == 7.5 and resolved["ai"] is None
+    resolved = resolve_apply_thresholds(
+        {"profile": "mixed", "thresholds": {"ai": 7.0, "quality": 6.0, "generation": None}},
+        threshold=8.0,
+        threshold_ai=None,
+        threshold_quality=None,
+        threshold_generation=None,
+    )
+    assert resolved["ai"] == 8.0 and resolved["quality"] == 6.0
+    resolved = resolve_apply_thresholds(
+        {"thresholds": {"ai": 7.0, "quality": 6.0, "generation": None}},
+        threshold=None,
+        threshold_ai=8.5,
+        threshold_quality=None,
+        threshold_generation=None,
+    )
+    assert resolved["ai"] == 8.5 and resolved["quality"] == 6.0
+    with tempfile.TemporaryDirectory() as tmp:
+        import io
+        from contextlib import redirect_stdout
+
+        input_dir = Path(tmp)
+        report = input_dir / "realism_audit_report.json"
+        write_report(
+            report,
+            {"threshold": 7.0, "thresholds": {"ai": 7.0, "quality": None, "generation": None}},
+            [{"file": "bad.jpg", "analysis": {"realism_score": 4.0, "is_realistic": False, "detected_artifacts": [], "reasoning": ""}}],
+        )
+        (input_dir / "bad.jpg").write_bytes(b"x")
+        assert resolve_report_path(input_dir, None) == report
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            apply_from_report(
+                report, input_dir, input_dir / "rejects",
+                threshold=None, threshold_ai=None, threshold_quality=None, threshold_generation=None,
+            )
+        out = captured.getvalue()
+        assert "Moved bad.jpg" in out and "realism_score 4.0 < 7.0" in out
+        assert not (input_dir / "bad.jpg").exists()
+    with tempfile.TemporaryDirectory() as tmp:
+        import io
+        from contextlib import redirect_stdout
+
+        input_dir = Path(tmp)
+        report = input_dir / "cull_report.json"
+        write_report(
+            report,
+            {"profile": "photos", "thresholds": {"ai": None, "quality": 6.0, "generation": None}},
+            [{"file": "blur.jpg", "quality": {"keeper_score": 3.1, "issues": ["motion_blur"], "reasoning": ""}}],
+        )
+        (input_dir / "blur.jpg").write_bytes(b"x")
+        assert resolve_report_path(input_dir, None) == report
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            apply_from_report(
+                report, input_dir, input_dir / "rejects",
+                threshold=None, threshold_ai=None, threshold_quality=None, threshold_generation=None,
+            )
+        out = captured.getvalue()
+        assert "Moved blur.jpg" in out and "motion_blur" in out and "keeper_score 3.1 < 6.0" in out
     ai_fun = resolve_cull_config(
         profile="ai-fun", checks=None, threshold=7.0,
         threshold_ai=None, threshold_quality=None, threshold_generation=None,
@@ -958,7 +1149,6 @@ def _self_check():
     assert "ai" in multi_entry and "analysis" not in multi_entry
     assert score_sort_key({"file": "z.jpg", "quality": {"keeper_score": 9.0}})[0] == -9.0
     assert score_sort_key({"file": "g.jpg", "generation": {"success_score": 9.0}})[0] == -9.0
-    import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         json.dump([{"file": "x.jpg", "analysis": {"realism_score": 5.0}}], f)
         f.flush()
@@ -1301,10 +1491,23 @@ def main():
     filter_dir = Path(args.filter_dir) if args.filter_dir else input_dir / "rejects"
 
     if args.apply_report is not None:
-        report_path = input_dir / DEFAULT_REPORT_NAME if args.apply_report == "__default__" else Path(args.apply_report)
+        explicit = None if args.apply_report == "__default__" else Path(args.apply_report)
+        report_path = resolve_report_path(input_dir, explicit)
         if not report_path.is_file():
-            raise SystemExit(f"Error: Report file '{report_path}' does not exist.")
-        apply_from_report(report_path, input_dir, filter_dir, args.threshold)
+            names = ", ".join(LEGACY_REPORT_NAMES)
+            raise SystemExit(
+                f"Error: Report file '{report_path}' does not exist "
+                f"(also checked legacy names: {names})."
+            )
+        apply_from_report(
+            report_path,
+            input_dir,
+            filter_dir,
+            threshold=args.threshold,
+            threshold_ai=args.threshold_ai,
+            threshold_quality=args.threshold_quality,
+            threshold_generation=args.threshold_generation,
+        )
         return
 
     run_cull(args, input_dir, filter_dir)
