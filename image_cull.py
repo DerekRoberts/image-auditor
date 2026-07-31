@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
-DEFAULT_REPORT_NAME = "realism_audit_report.json"
+DEFAULT_REPORT_NAME = "cull-report.json"
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
@@ -28,7 +28,7 @@ LENS_ISSUE = {"generation": "#18", "quality": "#19", "hygiene": "#3"}
 _ISSUE_TAG = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 
 
-class AuditConfig:
+class CullConfig:
     """Resolved profile, active lenses, and per-dimension thresholds."""
 
     __slots__ = ("profile", "lenses", "thresholds", "multi_dimensional")
@@ -162,7 +162,7 @@ def parse_checks(raw: str | None) -> tuple[str, ...] | None:
     return lenses
 
 
-def resolve_audit_config(
+def resolve_cull_config(
     *,
     profile: str | None,
     checks: tuple[str, ...] | None,
@@ -170,7 +170,7 @@ def resolve_audit_config(
     threshold_ai: float | None,
     threshold_quality: float | None,
     threshold_generation: float | None,
-) -> AuditConfig:
+) -> CullConfig:
     if profile is None:
         thresholds = default_thresholds(threshold)
         if threshold_ai is not None:
@@ -179,7 +179,7 @@ def resolve_audit_config(
             thresholds["quality"] = threshold_quality
         if threshold_generation is not None:
             thresholds["generation"] = threshold_generation
-        return AuditConfig(profile=None, lenses=("ai",), thresholds=thresholds)
+        return CullConfig(profile=None, lenses=("ai",), thresholds=thresholds)
 
     defaults = PROFILE_DEFAULTS[profile]
     lenses = checks if checks is not None else defaults["lenses"]
@@ -204,10 +204,10 @@ def resolve_audit_config(
     if threshold_generation is not None:
         thresholds["generation"] = threshold_generation
 
-    return AuditConfig(profile=profile, lenses=lenses, thresholds=thresholds)
+    return CullConfig(profile=profile, lenses=lenses, thresholds=thresholds)
 
 
-def validate_audit_config(config: AuditConfig) -> None:
+def validate_cull_config(config: CullConfig) -> None:
     missing = [l for l in config.lenses if l not in IMPLEMENTED_LENSES]
     if not missing:
         return
@@ -217,7 +217,7 @@ def validate_audit_config(config: AuditConfig) -> None:
         parts.append(f"  - {lens}: not implemented yet (see {issue})")
     profile_note = f" (profile={config.profile})" if config.profile else ""
     raise SystemExit(
-        "Cannot run audit: requested lens(es) are not implemented"
+        "Cannot run cull: requested lens(es) are not implemented"
         f"{profile_note}:\n"
         + "\n".join(parts)
         + "\nUse --profile mixed for AI realism scoring, or --checks to override lenses."
@@ -323,7 +323,7 @@ def realism_result_entry(filename: str, analysis: dict, *, multi_dimensional: bo
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Audit and sort AI-generated images based on photorealism using Ollama.")
+    parser = argparse.ArgumentParser(description="Cull and sort AI-generated images based on photorealism using Ollama.")
     parser.add_argument("--dir", default="./photos", help="Input directory containing images (.png, .jpg, .jpeg, .webp)")
     parser.add_argument("--filter-dir", default=None, help="Directory to move filtered-out/rejected files into (default: <input_dir>/rejects)")
     parser.add_argument("--model", default="llava", help="Local vision model to query via Ollama")
@@ -359,7 +359,7 @@ def parse_args():
         "--profile",
         choices=PROFILE_NAMES,
         default=None,
-        help="Audit profile: mixed (AI realism), ai-fun (generation), photos (quality); "
+        help="Cull profile: mixed (AI realism), ai-fun (generation), photos (quality); "
         "default: legacy single-score AI mode (no meta.profile)",
     )
     parser.add_argument(
@@ -375,7 +375,7 @@ def parse_args():
         const="__default__",
         default=None,
         metavar="PATH",
-        help="Apply file moves from an audit report without re-analyzing (default: <input_dir>/realism_audit_report.json)",
+        help="Apply file moves from a cull report without re-analyzing (default: <input_dir>/cull-report.json)",
     )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
     parser.add_argument(
@@ -605,7 +605,7 @@ def ensure_model(model_name: str):
 def process_image(
     img_path: Path,
     model_name: str,
-    config: AuditConfig,
+    config: CullConfig,
     cli_threshold: float,
     dry_run: bool,
     filter_dir: Path,
@@ -816,8 +816,8 @@ def analyze_image(img_path: Path, model_name: str, max_dimension: int = 0, fast:
             temp_path.unlink(missing_ok=True)
 
 
-def run_audit(args, input_dir: Path, filter_dir: Path):
-    config = resolve_audit_config(
+def run_cull(args, input_dir: Path, filter_dir: Path):
+    config = resolve_cull_config(
         profile=args.profile,
         checks=args.checks,
         threshold=args.threshold,
@@ -825,7 +825,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
         threshold_quality=args.threshold_quality,
         threshold_generation=args.threshold_generation,
     )
-    validate_audit_config(config)
+    validate_cull_config(config)
 
     ensure_model(args.model)
 
@@ -871,7 +871,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
         )
         write_report(report_path, meta, results)
         display_report_path = args.report_path_display or str(report_path)
-        print(f"\nAudit complete! {len(results)} of {len(image_paths)} images in report.")
+        print(f"\nCull complete! {len(results)} of {len(image_paths)} images in report.")
         print(f"Report saved to {display_report_path}")
     else:
         print(f"\nNo images were processed out of {len(image_paths)} found.")
@@ -918,21 +918,21 @@ def _self_check():
         7.0,
         gen_meta,
     ) is True
-    ai_fun = resolve_audit_config(
+    ai_fun = resolve_cull_config(
         profile="ai-fun", checks=None, threshold=7.0,
         threshold_ai=None, threshold_quality=None, threshold_generation=None,
     )
     assert ai_fun.profile == "ai-fun" and ai_fun.lenses == ("generation",)
-    validate_audit_config(ai_fun)
+    validate_cull_config(ai_fun)
     assert effective_thresholds({"threshold": 8.0, "thresholds": {"ai": None, "quality": 6.0, "generation": None}}, 7.0)["ai"] == 8.0
     assert multi_dimensional_active({"ai": 7.0, "quality": 6.0, "generation": None}) is True
     assert multi_dimensional_active({"ai": 7.0, "quality": None, "generation": None}) is False
-    mixed = resolve_audit_config(profile="mixed", checks=None, threshold=7.5, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    mixed = resolve_cull_config(profile="mixed", checks=None, threshold=7.5, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert mixed.profile == "mixed" and mixed.lenses == ("ai",) and mixed.multi_dimensional
     assert mixed.thresholds["ai"] == 7.5 and mixed.thresholds["quality"] == 6.0
-    photos_ai = resolve_audit_config(profile="photos", checks=("ai",), threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    photos_ai = resolve_cull_config(profile="photos", checks=("ai",), threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert photos_ai.thresholds["ai"] == 8.0 and photos_ai.thresholds["quality"] is None
-    legacy = resolve_audit_config(profile=None, checks=None, threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    legacy = resolve_cull_config(profile=None, checks=None, threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert legacy.profile is None and not legacy.multi_dimensional and legacy.thresholds["ai"] == 8.0
     assert parse_checks("hygiene,ai") == ("hygiene", "ai")
     try:
@@ -941,9 +941,9 @@ def _self_check():
         pass
     else:
         raise AssertionError("expected ValueError for empty --checks")
-    photos = resolve_audit_config(profile="photos", checks=None, threshold=6.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
+    photos = resolve_cull_config(profile="photos", checks=None, threshold=6.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert photos.profile == "photos" and photos.lenses == ("quality",) and photos.thresholds["quality"] == 6.0
-    validate_audit_config(photos)
+    validate_cull_config(photos)
     ai_block = analysis_to_ai_block(
         {"realism_score": 8.0, "is_realistic": True, "detected_artifacts": ["x"], "reasoning": "ok"}
     )
@@ -1012,9 +1012,9 @@ def _self_check():
         t.join()
     assert len(seen) == 8 and len(set(seen)) == 8
     _check_process_image_error_handling()
-    _check_run_audit_progress_tags()
-    _check_generation_profile_audit()
-    _check_quality_profile_audit()
+    _check_run_cull_progress_tags()
+    _check_generation_profile_cull()
+    _check_quality_profile_cull()
     _check_quality_score_bounds()
     _check_quality_fast_issue_validation()
 
@@ -1069,7 +1069,7 @@ def _check_quality_fast_issue_validation():
                 pass
 
 
-def _check_quality_profile_audit():
+def _check_quality_profile_cull():
     import io
     import sys
     from contextlib import redirect_stderr, redirect_stdout
@@ -1090,7 +1090,7 @@ def _check_quality_profile_audit():
                 return {"keeper_score": 2.5, "issues": ["pocket_shot", "accidental_frame"], "reasoning": "accidental pocket capture"}
             return {"keeper_score": 8.5, "issues": [], "reasoning": "sharp sunset, well exposed"}
 
-        config = resolve_audit_config(
+        config = resolve_cull_config(
             profile="photos", checks=None, threshold=6.0,
             threshold_ai=None, threshold_quality=None, threshold_generation=None,
         )
@@ -1122,7 +1122,7 @@ def _check_quality_profile_audit():
         )
         captured = io.StringIO()
         with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_quality", side_effect=mock_quality), redirect_stdout(captured), redirect_stderr(io.StringIO()):
-            run_audit(args, input_dir, filter_dir)
+            run_cull(args, input_dir, filter_dir)
 
         meta, results = load_report(input_dir / DEFAULT_REPORT_NAME)
         assert meta["profile"] == "photos"
@@ -1134,7 +1134,7 @@ def _check_quality_profile_audit():
         assert by_file["fail.jpg"]["status"] == "error"
 
 
-def _check_generation_profile_audit():
+def _check_generation_profile_cull():
     import io
     import sys
     from contextlib import redirect_stderr, redirect_stdout
@@ -1155,7 +1155,7 @@ def _check_generation_profile_audit():
                 return {"success_score": 3.0, "issues": ["extra_limbs"], "reasoning": "six fingers"}
             return {"success_score": 8.5, "issues": [], "reasoning": "coherent mashup"}
 
-        config = resolve_audit_config(
+        config = resolve_cull_config(
             profile="ai-fun", checks=None, threshold=7.0,
             threshold_ai=None, threshold_quality=None, threshold_generation=None,
         )
@@ -1187,7 +1187,7 @@ def _check_generation_profile_audit():
         )
         captured = io.StringIO()
         with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_generation", side_effect=mock_generation), redirect_stdout(captured), redirect_stderr(io.StringIO()):
-            run_audit(args, input_dir, filter_dir)
+            run_cull(args, input_dir, filter_dir)
 
         meta, results = load_report(input_dir / DEFAULT_REPORT_NAME)
         assert meta["profile"] == "ai-fun"
@@ -1205,7 +1205,7 @@ def _check_process_image_error_handling():
     from unittest.mock import patch
 
     mod = sys.modules[__name__]
-    legacy = resolve_audit_config(
+    legacy = resolve_cull_config(
         profile=None, checks=None, threshold=7.0,
         threshold_ai=None, threshold_quality=None, threshold_generation=None,
     )
@@ -1225,7 +1225,7 @@ def _check_process_image_error_handling():
         assert "[1/2] Error processing x.jpg: unexpected" in out.getvalue()
 
 
-def _check_run_audit_progress_tags():
+def _check_run_cull_progress_tags():
     import io
     import re
     import sys
@@ -1266,7 +1266,7 @@ def _check_run_audit_progress_tags():
         )
         captured = io.StringIO()
         with patch.object(mod, "ensure_model"), patch.object(mod, "analyze_image", side_effect=mock_analyze), redirect_stdout(captured), redirect_stderr(io.StringIO()):
-            run_audit(args, input_dir, filter_dir)
+            run_cull(args, input_dir, filter_dir)
 
         out = captured.getvalue()
         analyzing_tags = re.findall(r"(\[\d+/3\]) Analyzing (\S+?)\.\.\.", out)
@@ -1307,7 +1307,7 @@ def main():
         apply_from_report(report_path, input_dir, filter_dir, args.threshold)
         return
 
-    run_audit(args, input_dir, filter_dir)
+    run_cull(args, input_dir, filter_dir)
 
 
 if __name__ == "__main__":

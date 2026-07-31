@@ -1,6 +1,6 @@
-# Image Auditor
+# Image Cull
 
-A local CLI tool for auditing, deduplicating, and sorting photo collections and AI generations using local vision LLMs via [Ollama](https://ollama.com).
+A local CLI tool for culling, deduplicating, and sorting photo collections and AI generations using local vision LLMs via [Ollama](https://ollama.com).
 
 Evaluates image quality, detects generation artifacts and defects (e.g. plastic skin, warped fingers, lighting errors), scores quality from 1.0 to 10.0, and automatically filters unwanted photos into a target directory while preserving keepers in-place.
 
@@ -26,12 +26,12 @@ Evaluates image quality, detects generation artifacts and defects (e.g. plastic 
 Clone the repository and run the setup script:
 
 ```bash
-git clone https://github.com/DerekRoberts/image-auditor.git
-cd image-auditor
+git clone https://github.com/DerekRoberts/image-cull.git
+cd image-cull
 ./setup.sh
 ```
 
-The `./setup.sh` script builds the container image and installs the standalone `image-auditor` binary wrapper into `~/.local/bin/image-auditor`.
+The `./setup.sh` script builds the container image and installs the standalone `image-cull` binary wrapper into `~/.local/bin/image-cull`.
 
 ---
 
@@ -39,26 +39,26 @@ The `./setup.sh` script builds the container image and installs the standalone `
 
 ### Run from anywhere
 ```bash
-image-auditor ~/Downloads --threshold 7.5
+image-cull ~/Downloads --threshold 7.5
 ```
 
 ### Dry-run (JSON report only, no file movements)
 ```bash
-image-auditor ~/Downloads --dry-run
+image-cull ~/Downloads --dry-run
 ```
 
 ### Apply moves from a reviewed report (no Ollama)
-After reviewing or hand-editing `realism_audit_report.json`:
+After reviewing or hand-editing `cull-report.json`:
 ```bash
-image-auditor ~/Downloads --apply-report --threshold 7.5
+image-cull ~/Downloads --apply-report --threshold 7.5
 ```
 
 ### Specify custom vision model
 ```bash
-image-auditor ~/Downloads --model llava --threshold 8.0
+image-cull ~/Downloads --model llava --threshold 8.0
 ```
 
-### Audit profiles (`--profile`)
+### Cull profiles (`--profile`)
 
 Profiles select which analysis lenses run and set default thresholds. Without `--profile`, behavior is unchanged: single AI realism score, legacy `analysis` block in the report, no `meta.profile`.
 
@@ -70,8 +70,8 @@ Profiles select which analysis lenses run and set default thresholds. Without `-
 
 **Mixed folder (fully working today):**
 ```bash
-image-auditor ~/Downloads --profile mixed --dry-run
-image-auditor ~/Downloads --profile mixed --threshold 7.5
+image-cull ~/Downloads --profile mixed --dry-run
+image-cull ~/Downloads --profile mixed --threshold 7.5
 ```
 
 Reports use the multi-dimensional layout: `meta.profile`, `meta.thresholds`, and per-file `ai` blocks (not legacy `analysis`).
@@ -88,9 +88,9 @@ For intentional AI art, photorealism is the wrong metric. The generation lens sc
 | Stylized but clean cartoon | Low | **High** — if that's the intent |
 
 ```bash
-image-auditor ~/AI-Art --profile ai-fun --dry-run
-image-auditor ~/AI-Art --profile ai-fun --threshold 7.5
-image-auditor ~/AI-Art --profile ai-fun --fast --max-dimension 1024 --dry-run
+image-cull ~/AI-Art --profile ai-fun --dry-run
+image-cull ~/AI-Art --profile ai-fun --threshold 7.5
+image-cull ~/AI-Art --profile ai-fun --fast --max-dimension 1024 --dry-run
 ```
 
 Reports use `generation` blocks with `success_score`, `issues[]`, and `reasoning`. Rejects when `success_score` is below `--threshold-generation` (or `--threshold`, which maps to the profile's primary lens). Set `"keep": true` on edge cases after dry-run review to preserve them on `--apply-report`.
@@ -108,21 +108,21 @@ For real photos, the question is *"Would I keep this in an album?"* — not whet
 | Eyes closed on group photo | High | **Low** — eyes_closed |
 
 ```bash
-image-auditor ~/Pictures --profile photos --dry-run
-image-auditor ~/Pictures --profile photos --threshold 6.0
-image-auditor ~/Pictures --profile photos --fast --max-dimension 1024 --dry-run
+image-cull ~/Pictures --profile photos --dry-run
+image-cull ~/Pictures --profile photos --threshold 6.0
+image-cull ~/Pictures --profile photos --fast --max-dimension 1024 --dry-run
 ```
 
 Reports use `quality` blocks with `keeper_score`, `issues[]`, and `reasoning`. Rejects when `keeper_score` is below `--threshold-quality` (or `--threshold`, which maps to the profile's primary lens). Common issue tags: `motion_blur`, `out_of_focus`, `underexposed`, `overexposed`, `eyes_closed`, `accidental_frame`, `finger_on_lens`, `pocket_shot`, `floor_shot`, `screenshot`, `ui_chrome`, `duplicate_feel`. Set `"keep": true` on edge cases after dry-run review to preserve them on `--apply-report`.
 
 Override the profile’s lens set (still validates implementation):
 ```bash
-image-auditor ~/Downloads --profile mixed --checks ai --dry-run
+image-cull ~/Downloads --profile mixed --checks ai --dry-run
 ```
 
 Per-dimension threshold overrides (defaults come from the profile):
 ```bash
-image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 --dry-run
+image-cull ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 --dry-run
 ```
 
 ---
@@ -141,7 +141,7 @@ image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.
 | `--profile` | — | `mixed`, `ai-fun`, or `photos`; omit for legacy single-score mode |
 | `--checks` | — | Comma-separated lenses overriding the profile set (`hygiene`, `ai`, `quality`, `generation`) |
 | `--dry-run` | `False` | Generate report without moving files |
-| `--apply-report` | — | Apply file moves from an existing audit report without re-analyzing (optional path; default: `<input_dir>/realism_audit_report.json`) |
+| `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: `<input_dir>/cull-report.json`) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
 | `--fast` | `False` | Minimal VLM output (score, flag, artifacts only); skips reasoning for faster bulk triage |
 
@@ -159,7 +159,7 @@ image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.
 
 **When to stay on full mode:**
 
-- First audit of a new collection or model
+- First cull of a new collection or model
 - Scores near your threshold (±1.0) where reasoning helps you decide overrides
 - Any workflow where the JSON report is the primary review surface
 
@@ -182,11 +182,11 @@ If you do enable it, dry-run both ways on a sample folder and compare scores bef
 
 ---
 
-## Sample JSON Audit Report (`realism_audit_report.json`)
+## Sample JSON Cull Report (`cull-report.json`)
 
 ### Single-score mode (default)
 
-Current audits emit one `analysis` block per file plus legacy `meta.threshold`. New reports also record `meta.thresholds` for forward compatibility with profiles.
+Current runs emit one `analysis` block per file plus legacy `meta.threshold`. New reports also record `meta.thresholds` for forward compatibility with profiles.
 
 ```json
 {
