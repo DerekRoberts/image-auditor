@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -25,7 +26,7 @@ SCORE_FIELD = {"ai": "realism_score", "quality": "keeper_score", "generation": "
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
 PROFILE_NAMES = ("mixed", "ai-fun", "photos")
-IMPLEMENTED_LENSES = frozenset({"ai", "generation", "quality"})
+IMPLEMENTED_LENSES = frozenset({"ai", "generation", "quality", "hygiene"})
 LENS_ISSUE = {"generation": "#18", "quality": "#19", "hygiene": "#3"}
 _ISSUE_TAG = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 
@@ -50,7 +51,7 @@ class CullConfig:
 
 PROFILE_DEFAULTS: dict[str, dict] = {
     "mixed": {
-        "lenses": ("ai",),
+        "lenses": ("hygiene", "ai"),
         "thresholds": {"ai": 7.0, "quality": 6.0, "generation": None},
     },
     "ai-fun": {
@@ -58,7 +59,7 @@ PROFILE_DEFAULTS: dict[str, dict] = {
         "thresholds": {"ai": None, "quality": None, "generation": 7.0},
     },
     "photos": {
-        "lenses": ("quality",),
+        "lenses": ("hygiene", "quality"),
         "thresholds": {"ai": None, "quality": 6.0, "generation": None},
     },
 }
@@ -96,6 +97,7 @@ class RealismAnalysisFast(BaseModel):
 class HygieneVerdict(BaseModel):
     action: str
     exact_dupe_of: str | None = None
+    reason: str | None = None
 
 
 class AiVerdict(BaseModel):
@@ -150,6 +152,18 @@ def default_thresholds(threshold: float) -> dict[str, float | None]:
 
 def empty_thresholds() -> dict[str, float | None]:
     return {"ai": None, "quality": None, "generation": None}
+
+
+def parse_min_res(raw: str | None) -> tuple[int, int] | None:
+    if raw is None:
+        return None
+    match = re.match(r"^(\d+)x(\d+)$", raw.strip(), re.IGNORECASE)
+    if not match:
+        raise ValueError("--min-res must be WIDTHxHEIGHT (e.g. 512x512)")
+    width, height = int(match.group(1)), int(match.group(2))
+    if width < 1 or height < 1:
+        raise ValueError("--min-res dimensions must be positive")
+    return width, height
 
 
 def parse_checks(raw: str | None) -> tuple[str, ...] | None:
@@ -322,6 +336,7 @@ def build_report_meta(
     dry_run: bool,
     profile: str | None = None,
     thresholds: dict[str, float | None] | None = None,
+    min_res: tuple[int, int] | None = None,
 ) -> dict:
     meta = {
         "threshold": threshold,
@@ -334,6 +349,8 @@ def build_report_meta(
     }
     if profile is not None:
         meta["profile"] = profile
+    if min_res is not None:
+        meta["min_res"] = f"{min_res[0]}x{min_res[1]}"
     return meta
 
 
@@ -430,6 +447,12 @@ def parse_args():
         help="Optional downscale before Ollama: long edge at most N px (0 = disabled, default)",
     )
     parser.add_argument(
+        "--min-res",
+        default=None,
+        metavar="WxH",
+        help="Reject images smaller than WIDTHxHEIGHT pixels (e.g. 512x512); hygiene lens only",
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help="Minimal VLM output (score, flag, artifacts only) for faster bulk triage",
@@ -441,6 +464,11 @@ def parse_args():
 
     try:
         args.checks = parse_checks(args.checks)
+    except ValueError as e:
+        parser.error(str(e))
+
+    try:
+        args.min_res = parse_min_res(args.min_res)
     except ValueError as e:
         parser.error(str(e))
 
@@ -515,6 +543,8 @@ def _format_hygiene_reason(hygiene: dict) -> str:
     action = hygiene.get("action", "reject")
     if dupe := hygiene.get("exact_dupe_of"):
         return f"hygiene: {action} (exact_dupe_of {dupe})"
+    if reason := hygiene.get("reason"):
+        return f"hygiene: {action} ({reason})"
     return f"hygiene: {action}"
 
 
@@ -666,6 +696,59 @@ def scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int,
     return max(1, round(width * scale)), max(1, round(height * scale))
 
 
+def build_dupe_map(image_paths: list[Path]) -> dict[str, str]:
+    """Map duplicate filename -> keeper filename (first by sorted name)."""
+    by_hash: dict[str, str] = {}
+    dupes: dict[str, str] = {}
+    for path in sorted(image_paths, key=lambda p: p.name):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest in by_hash:
+            dupes[path.name] = by_hash[digest]
+        else:
+            by_hash[digest] = path.name
+    return dupes
+
+
+def _is_solid_color(img) -> bool:
+    # ponytail: 8x8 downsample; per-channel range <= 2 catches blank/solid renders; upgrade: histogram
+    small = img.resize((8, 8))
+    pixels = list(small.getdata())
+    if len(pixels) <= 1:
+        return True
+    channels = len(pixels[0]) if isinstance(pixels[0], tuple) else 1
+    for ch in range(channels):
+        values = [p[ch] if isinstance(p, tuple) else p for p in pixels]
+        if max(values) - min(values) > 2:
+            return False
+    return True
+
+
+def check_hygiene(
+    img_path: Path,
+    *,
+    dupe_of: str | None = None,
+    min_res: tuple[int, int] | None = None,
+) -> dict:
+    if dupe_of is not None:
+        return {"action": "reject", "exact_dupe_of": dupe_of}
+
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(img_path) as img:
+            img = ImageOps.exif_transpose(img)
+            img.load()
+            width, height = img.size
+            if min_res is not None and (width < min_res[0] or height < min_res[1]):
+                return {"action": "reject", "reason": f"below_min_res ({width}x{height})"}
+            if _is_solid_color(img):
+                return {"action": "reject", "reason": "solid_color"}
+    except Exception:
+        return {"action": "reject", "reason": "corrupt"}
+
+    return {"action": "keep"}
+
+
 def prepare_analysis_image(img_path: Path, max_dimension: int) -> tuple[Path, Path | None]:
     """Return (path for Ollama, temp file to delete after analysis, or None)."""
     if max_dimension <= 0:
@@ -720,6 +803,9 @@ def process_image(
     print_lock: threading.Lock,
     move_lock: threading.Lock,
     progress: ScanProgress | None = None,
+    *,
+    dupe_of: str | None = None,
+    min_res: tuple[int, int] | None = None,
 ) -> dict:
     tag = f"{progress.begin()} " if progress else ""
 
@@ -728,6 +814,36 @@ def process_image(
 
     blocks: dict[str, dict] = {}
     try:
+        if "hygiene" in config.lenses:
+            hygiene_dict = check_hygiene(img_path, dupe_of=dupe_of, min_res=min_res)
+            HygieneVerdict(**hygiene_dict)
+            blocks["hygiene"] = hygiene_dict
+            with print_lock:
+                if hygiene_dict["action"] == "reject":
+                    detail = hygiene_dict.get("exact_dupe_of") or hygiene_dict.get("reason") or "reject"
+                    print(f"{tag}  Hygiene: reject ({detail})")
+                else:
+                    print(f"{tag}  Hygiene: keep")
+            if hygiene_dict["action"] == "reject":
+                if config.multi_dimensional:
+                    result = result_entry_from_lenses(img_path.name, **blocks)
+                else:
+                    result = {"file": img_path.name, "hygiene": hygiene_dict}
+                if not dry_run:
+                    meta = {"threshold": cli_threshold, "thresholds": config.thresholds}
+                    if should_reject(result, cli_threshold, meta):
+                        try:
+                            dest = move_reject(img_path, filter_dir, move_lock)
+                            with print_lock:
+                                print(f"{tag}  -> Moved filtered image to {dest}")
+                        except OSError as e:
+                            with print_lock:
+                                print(f"{tag}  -> Error moving {img_path.name}: {e}")
+                            result["move_error"] = str(e)
+                    else:
+                        with print_lock:
+                            print(f"{tag}  -> Preserved keeper in place")
+                return result
         if "ai" in config.lenses:
             analysis_dict = analyze_image(img_path, model_name, max_dimension, fast)
             analysis = RealismAnalysis(**analysis_dict)
@@ -933,9 +1049,13 @@ def run_cull(args, input_dir: Path, filter_dir: Path):
     )
     validate_cull_config(config)
 
-    ensure_model(args.model)
+    needs_vlm = any(lens in SCORED_DIMENSIONS for lens in config.lenses)
+    if needs_vlm:
+        ensure_model(args.model)
 
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()]
+    dupe_map = build_dupe_map(image_paths) if "hygiene" in config.lenses else {}
+    min_res = args.min_res if "hygiene" in config.lenses else None
     depth = pipeline_depth(len(image_paths))
     print_lock = threading.Lock()
     move_lock = threading.Lock()
@@ -957,6 +1077,8 @@ def run_cull(args, input_dir: Path, filter_dir: Path):
             print_lock,
             move_lock,
             progress,
+            dupe_of=dupe_map.get(img_path.name),
+            min_res=min_res,
         )
 
     with ThreadPoolExecutor(max_workers=depth) as executor:
@@ -974,6 +1096,7 @@ def run_cull(args, input_dir: Path, filter_dir: Path):
             dry_run=args.dry_run,
             profile=config.profile,
             thresholds=config.thresholds,
+            min_res=min_res,
         )
         write_report(report_path, meta, results)
         display_report_path = args.report_path_display or str(report_path)
@@ -1119,13 +1242,15 @@ def _self_check():
     assert multi_dimensional_active({"ai": 7.0, "quality": 6.0, "generation": None}) is True
     assert multi_dimensional_active({"ai": 7.0, "quality": None, "generation": None}) is False
     mixed = resolve_cull_config(profile="mixed", checks=None, threshold=7.5, threshold_ai=None, threshold_quality=None, threshold_generation=None)
-    assert mixed.profile == "mixed" and mixed.lenses == ("ai",) and mixed.multi_dimensional
+    assert mixed.profile == "mixed" and mixed.lenses == ("hygiene", "ai") and mixed.multi_dimensional
     assert mixed.thresholds["ai"] == 7.5 and mixed.thresholds["quality"] == 6.0
     photos_ai = resolve_cull_config(profile="photos", checks=("ai",), threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert photos_ai.thresholds["ai"] == 8.0 and photos_ai.thresholds["quality"] is None
     legacy = resolve_cull_config(profile=None, checks=None, threshold=8.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
     assert legacy.profile is None and not legacy.multi_dimensional and legacy.thresholds["ai"] == 8.0
     assert parse_checks("hygiene,ai") == ("hygiene", "ai")
+    assert parse_min_res("512x512") == (512, 512)
+    assert parse_min_res(None) is None
     try:
         parse_checks("")
     except ValueError:
@@ -1133,7 +1258,7 @@ def _self_check():
     else:
         raise AssertionError("expected ValueError for empty --checks")
     photos = resolve_cull_config(profile="photos", checks=None, threshold=6.0, threshold_ai=None, threshold_quality=None, threshold_generation=None)
-    assert photos.profile == "photos" and photos.lenses == ("quality",) and photos.thresholds["quality"] == 6.0
+    assert photos.profile == "photos" and photos.lenses == ("hygiene", "quality") and photos.thresholds["quality"] == 6.0
     validate_cull_config(photos)
     ai_block = analysis_to_ai_block(
         {"realism_score": 8.0, "is_realistic": True, "detected_artifacts": ["x"], "reasoning": "ok"}
@@ -1205,6 +1330,7 @@ def _self_check():
     _check_run_cull_progress_tags()
     _check_generation_profile_cull()
     _check_quality_profile_cull()
+    _check_hygiene_profile_cull()
     _check_quality_score_bounds()
     _check_quality_fast_issue_validation()
 
@@ -1265,13 +1391,20 @@ def _check_quality_profile_cull():
     from contextlib import redirect_stderr, redirect_stdout
     from unittest.mock import patch
 
+    from PIL import Image
+
     mod = sys.modules[__name__]
     with tempfile.TemporaryDirectory() as tmp:
         input_dir = Path(tmp) / "photos"
         filter_dir = Path(tmp) / "rejects"
         input_dir.mkdir()
-        for name in ("sunset.jpg", "pocket.jpg", "fail.jpg"):
-            (input_dir / name).write_bytes(b"x")
+        for name, base in (("sunset.jpg", 200), ("pocket.jpg", 50), ("fail.jpg", 80)):
+            img = Image.new("RGB", (800, 600))
+            px = img.load()
+            for y in range(600):
+                for x in range(0, 800, 40):
+                    px[x, y] = (base + x + y) % 256, base, (128 + y) % 256
+            img.save(input_dir / name)
 
         def mock_quality(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
             if img_path.name == "fail.jpg":
@@ -1293,6 +1426,7 @@ def _check_quality_profile_cull():
                 )
 
         out = captured.getvalue()
+        assert "Hygiene: keep" in out
         assert "Keeper: 8.5" in out
         assert "Keeper: 2.5" in out
         assert "Error processing fail.jpg" in out
@@ -1307,6 +1441,7 @@ def _check_quality_profile_cull():
             checks=None,
             dry_run=True,
             max_dimension=512,
+            min_res=None,
             fast=False,
             report_path_display=None,
         )
@@ -1372,6 +1507,7 @@ def _check_generation_profile_cull():
             checks=None,
             dry_run=True,
             max_dimension=512,
+            min_res=None,
             fast=False,
             report_path_display=None,
         )
@@ -1386,6 +1522,100 @@ def _check_generation_profile_cull():
         assert by_file["octo-rex.png"]["generation"]["success_score"] == 8.5
         assert by_file["six-finger-trex.png"]["generation"]["success_score"] == 3.0
         assert by_file["fail.png"]["status"] == "error"
+
+
+def _check_hygiene_profile_cull():
+    import io
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+
+    from PIL import Image
+
+    mod = sys.modules[__name__]
+    with tempfile.TemporaryDirectory() as tmp:
+        input_dir = Path(tmp) / "photos"
+        filter_dir = Path(tmp) / "rejects"
+        input_dir.mkdir()
+
+        payload = b"same-bytes"
+        (input_dir / "keeper.jpg").write_bytes(payload)
+        (input_dir / "dupe.jpg").write_bytes(payload)
+        Image.new("RGB", (100, 100), "green").save(input_dir / "tiny.jpg")
+        (input_dir / "bad.jpg").write_bytes(b"not-an-image")
+        Image.new("RGB", (800, 600), "red").save(input_dir / "blank.png")
+        good = Image.new("RGB", (800, 600))
+        px = good.load()
+        for y in range(600):
+            for x in range(0, 800, 40):
+                px[x, y] = (x + y) % 256, (128 + y) % 256, (64 + x) % 256
+        good.save(input_dir / "good.jpg")
+
+        config = resolve_cull_config(
+            profile="mixed", checks=None, threshold=7.0,
+            threshold_ai=None, threshold_quality=None, threshold_generation=None,
+        )
+        min_res = (512, 512)
+        paths = [p for p in input_dir.iterdir() if p.is_file()]
+        dupe_map = build_dupe_map(paths)
+        assert dupe_map == {"keeper.jpg": "dupe.jpg"}
+
+        vlm_called: list[str] = []
+
+        def mock_analyze(img_path: Path, model_name: str, max_dimension: int = 0, fast: bool = False) -> dict:
+            vlm_called.append(img_path.name)
+            return {"realism_score": 8.0, "is_realistic": True, "detected_artifacts": [], "reasoning": "ok"}
+
+        captured = io.StringIO()
+        with patch.object(mod, "analyze_image", side_effect=mock_analyze), redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            for img in sorted(paths):
+                process_image(
+                    img, "llava", config, 7.0, True, filter_dir, 0, False,
+                    threading.Lock(), threading.Lock(), ScanProgress(len(paths)),
+                    dupe_of=dupe_map.get(img.name),
+                    min_res=min_res,
+                )
+
+        out = captured.getvalue()
+        assert "Hygiene: reject (dupe.jpg)" in out
+        assert "below_min_res" in out
+        assert "corrupt" in out
+        assert "solid_color" in out
+        assert vlm_called == ["good.jpg"]
+
+        assert check_hygiene(input_dir / "bad.jpg", dupe_of=None, min_res=None)["reason"] == "corrupt"
+        tiny = check_hygiene(input_dir / "tiny.jpg", dupe_of=None, min_res=(512, 512))
+        assert tiny["action"] == "reject" and tiny["reason"].startswith("below_min_res")
+        assert check_hygiene(input_dir / "dupe.jpg", dupe_of="keeper.jpg", min_res=None) == {
+            "action": "reject", "exact_dupe_of": "keeper.jpg",
+        }
+
+        args = argparse.Namespace(
+            model="llava",
+            threshold=7.0,
+            threshold_ai=None,
+            threshold_quality=None,
+            threshold_generation=None,
+            profile="mixed",
+            checks=("hygiene",),
+            dry_run=True,
+            max_dimension=0,
+            min_res=(512, 512),
+            fast=False,
+            report_path_display=None,
+        )
+        captured = io.StringIO()
+        with patch.object(mod, "ensure_model") as mock_ensure, redirect_stdout(captured), redirect_stderr(io.StringIO()):
+            run_cull(args, input_dir, filter_dir)
+        mock_ensure.assert_not_called()
+
+        meta, results = load_report(input_dir / DEFAULT_REPORT_NAME)
+        assert meta["min_res"] == "512x512"
+        by_file = {r["file"]: r for r in results}
+        assert by_file["keeper.jpg"]["hygiene"]["exact_dupe_of"] == "dupe.jpg"
+        assert by_file["tiny.jpg"]["hygiene"]["reason"].startswith("below_min_res")
+        assert by_file["bad.jpg"]["hygiene"]["reason"] == "corrupt"
+        assert by_file["blank.png"]["hygiene"]["reason"] == "solid_color"
 
 
 def _check_process_image_error_handling():
@@ -1451,6 +1681,7 @@ def _check_run_cull_progress_tags():
             checks=None,
             dry_run=False,
             max_dimension=0,
+            min_res=None,
             fast=False,
             report_path_display=None,
         )
