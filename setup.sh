@@ -3,9 +3,9 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
-BIN_PATH="$BIN_DIR/image-auditor"
+BIN_PATH="$BIN_DIR/image-cull"
 
-echo "==> Building container image 'image-auditor:latest'..."
+echo "==> Building container image 'image-cull:latest'..."
 if command -v podman >/dev/null 2>&1; then
     CONTAINER_ENGINE="podman"
 elif command -v docker >/dev/null 2>&1; then
@@ -15,7 +15,7 @@ else
     exit 1
 fi
 
-$CONTAINER_ENGINE build -t image-auditor:latest "$PROJECT_DIR"
+$CONTAINER_ENGINE build -t image-cull:latest "$PROJECT_DIR"
 
 echo "==> Installing executable wrapper script to $BIN_PATH..."
 mkdir -p "$BIN_DIR"
@@ -82,7 +82,7 @@ fi
 
 exec $CONTAINER_ENGINE run --rm --network host \
     "${MOUNTS[@]}" \
-    image-auditor:latest --dir /photos --report-path-display "$REAL_HOST_DIR/realism_audit_report.json" "${CONTAINER_FLAGS[@]}" "${ARGS[@]}"
+    image-cull:latest --dir /photos --report-path-display "$REAL_HOST_DIR/cull_report.json" "${CONTAINER_FLAGS[@]}" "${ARGS[@]}"
 EOF
 
 chmod +x "$BIN_PATH"
@@ -92,6 +92,6 @@ echo "=========================================================="
 echo " Setup complete!"
 echo " Executable binary installed to: $BIN_PATH"
 echo "=========================================================="
-echo " You can now run the auditor from anywhere using:"
-echo "   image-auditor ~/Downloads --filter-dir ~/Desktop/Filtered_Photos --dry-run"
+echo " You can now run image-cull from anywhere using:"
+echo "   image-cull ~/Downloads --filter-dir ~/Desktop/Filtered_Photos --dry-run"
 echo ""

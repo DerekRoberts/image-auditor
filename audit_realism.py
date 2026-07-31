@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field, field_validator
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_THRESHOLD = 7.0
-DEFAULT_REPORT_NAME = "realism_audit_report.json"
+DEFAULT_REPORT_NAME = "cull_report.json"
+LEGACY_REPORT_NAME = "realism_audit_report.json"
 MAX_IN_FLIGHT = 16  # ponytail: cap client-side requests; Ollama throttles GPU work
 DIMENSION_BLOCKS = ("hygiene", "ai", "quality", "generation")
 SCORED_DIMENSIONS = ("ai", "quality", "generation")
@@ -217,7 +218,7 @@ def validate_audit_config(config: AuditConfig) -> None:
         parts.append(f"  - {lens}: not implemented yet (see {issue})")
     profile_note = f" (profile={config.profile})" if config.profile else ""
     raise SystemExit(
-        "Cannot run audit: requested lens(es) are not implemented"
+        "Cannot run cull: requested lens(es) are not implemented"
         f"{profile_note}:\n"
         + "\n".join(parts)
         + "\nUse --profile mixed for AI realism scoring, or --checks to override lenses."
@@ -323,7 +324,7 @@ def realism_result_entry(filename: str, analysis: dict, *, multi_dimensional: bo
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Audit and sort AI-generated images based on photorealism using Ollama.")
+    parser = argparse.ArgumentParser(description="Cull and sort AI-generated images based on photorealism using Ollama.")
     parser.add_argument("--dir", default="./photos", help="Input directory containing images (.png, .jpg, .jpeg, .webp)")
     parser.add_argument("--filter-dir", default=None, help="Directory to move filtered-out/rejected files into (default: <input_dir>/rejects)")
     parser.add_argument("--model", default="llava", help="Local vision model to query via Ollama")
@@ -359,7 +360,7 @@ def parse_args():
         "--profile",
         choices=PROFILE_NAMES,
         default=None,
-        help="Audit profile: mixed (AI realism), ai-fun (generation), photos (quality); "
+        help="Cull profile: mixed (AI realism), ai-fun (generation), photos (quality); "
         "default: legacy single-score AI mode (no meta.profile)",
     )
     parser.add_argument(
@@ -375,7 +376,8 @@ def parse_args():
         const="__default__",
         default=None,
         metavar="PATH",
-        help="Apply file moves from an audit report without re-analyzing (default: <input_dir>/realism_audit_report.json)",
+        help="Apply file moves from a cull report without re-analyzing (default: <input_dir>/cull_report.json; "
+        "falls back to legacy realism_audit_report.json)",
     )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
     parser.add_argument(
@@ -428,6 +430,17 @@ def parse_args():
     if args.max_dimension < 0:
         parser.error(f"--max-dimension must be >= 0, got {args.max_dimension}")
     return args
+
+
+def resolve_default_report_path(input_dir: Path) -> Path:
+    """Default --apply-report path; ponytail: legacy filename fallback for one release minimum."""
+    primary = input_dir / DEFAULT_REPORT_NAME
+    if primary.is_file():
+        return primary
+    legacy = input_dir / LEGACY_REPORT_NAME
+    if legacy.is_file():
+        return legacy
+    return primary
 
 
 def load_report(path: Path) -> tuple[dict | None, list]:
@@ -871,7 +884,7 @@ def run_audit(args, input_dir: Path, filter_dir: Path):
         )
         write_report(report_path, meta, results)
         display_report_path = args.report_path_display or str(report_path)
-        print(f"\nAudit complete! {len(results)} of {len(image_paths)} images in report.")
+        print(f"\nCull complete! {len(results)} of {len(image_paths)} images in report.")
         print(f"Report saved to {display_report_path}")
     else:
         print(f"\nNo images were processed out of {len(image_paths)} found.")
@@ -1011,6 +1024,15 @@ def _self_check():
     for t in threads:
         t.join()
     assert len(seen) == 8 and len(set(seen)) == 8
+    assert resolve_default_report_path(Path("/nonexistent")) == Path("/nonexistent") / DEFAULT_REPORT_NAME
+    with tempfile.TemporaryDirectory() as tmp:
+        input_dir = Path(tmp)
+        legacy = input_dir / LEGACY_REPORT_NAME
+        legacy.write_text('{"meta": {}, "results": []}')
+        assert resolve_default_report_path(input_dir) == legacy
+        primary = input_dir / DEFAULT_REPORT_NAME
+        primary.write_text('{"meta": {}, "results": []}')
+        assert resolve_default_report_path(input_dir) == primary
     _check_process_image_error_handling()
     _check_run_audit_progress_tags()
     _check_generation_profile_audit()
@@ -1301,7 +1323,11 @@ def main():
     filter_dir = Path(args.filter_dir) if args.filter_dir else input_dir / "rejects"
 
     if args.apply_report is not None:
-        report_path = input_dir / DEFAULT_REPORT_NAME if args.apply_report == "__default__" else Path(args.apply_report)
+        report_path = (
+            resolve_default_report_path(input_dir)
+            if args.apply_report == "__default__"
+            else Path(args.apply_report)
+        )
         if not report_path.is_file():
             raise SystemExit(f"Error: Report file '{report_path}' does not exist.")
         apply_from_report(report_path, input_dir, filter_dir, args.threshold)

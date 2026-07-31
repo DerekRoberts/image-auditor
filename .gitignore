@@ -8,7 +8,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Auditor Outputs & Temporary Files
+# Cull Outputs & Temporary Files
+cull_report.json
 realism_audit_report.json
 keepers/
 rejects/
