@@ -64,9 +64,9 @@ Profiles select which analysis lenses run and set default thresholds. Without `-
 
 | Profile | Question | Lenses | Status |
 | --- | --- | --- | --- |
-| `mixed` (recommended for unknown folders) | What is this and should I keep it? | `ai` (+ `hygiene`, `quality` when #3/#19 land) | **AI lens working** |
+| `mixed` (recommended for unknown folders) | What is this and should I keep it? | `ai` (+ `hygiene`, `quality` when #3 lands) | **AI lens working** |
 | `ai-fun` | Is this render successful / worth keeping? | `generation` (+ optional `hygiene`) | **Generation lens working** |
-| `photos` | Is this a keeper real photo? | `quality` (+ optional `hygiene` when #3 lands) | Quality lens pending (#19) |
+| `photos` | Is this a keeper real photo? | `quality` (+ optional `hygiene` when #3 lands) | **Quality lens working** |
 
 **Mixed folder (fully working today):**
 ```bash
@@ -95,11 +95,25 @@ image-auditor ~/AI-Art --profile ai-fun --fast --max-dimension 1024 --dry-run
 
 Reports use `generation` blocks with `success_score`, `issues[]`, and `reasoning`. Rejects when `success_score` is below `--threshold-generation` (or `--threshold`, which maps to the profile's primary lens). Set `"keep": true` on edge cases after dry-run review to preserve them on `--apply-report`.
 
-**Camera roll / Takeout (exits until quality lens ships):**
+**Camera roll / Takeout (keeper quality, not AI detection):**
+
+For real photos, the question is *"Would I keep this in an album?"* — not whether it looks AI-generated. The quality lens scores blur, exposure, framing accidents, and screenshots.
+
+| Image | AI realism (wrong lens) | Keeper quality (right lens) |
+| --- | --- | --- |
+| Sharp sunset, well exposed | High | **High** — intentional keeper |
+| Motion-blurred party shot | High | **Low** — motion_blur |
+| Pocket / floor accidental capture | High | **Low** — pocket_shot, accidental_frame |
+| Screenshot with UI chrome | High | **Low** — screenshot, ui_chrome |
+| Eyes closed on group photo | High | **Low** — eyes_closed |
+
 ```bash
 image-auditor ~/Pictures --profile photos --dry-run
-# → clear error: quality lens not implemented yet (see #19)
+image-auditor ~/Pictures --profile photos --threshold 6.0
+image-auditor ~/Pictures --profile photos --fast --max-dimension 1024 --dry-run
 ```
+
+Reports use `quality` blocks with `keeper_score`, `issues[]`, and `reasoning`. Rejects when `keeper_score` is below `--threshold-quality` (or `--threshold`, which maps to the profile's primary lens). Common issue tags: `motion_blur`, `out_of_focus`, `underexposed`, `overexposed`, `eyes_closed`, `accidental_frame`, `finger_on_lens`, `pocket_shot`, `floor_shot`, `screenshot`, `ui_chrome`, `duplicate_feel`. Set `"keep": true` on edge cases after dry-run review to preserve them on `--apply-report`.
 
 Override the profile’s lens set (still validates implementation):
 ```bash
@@ -135,7 +149,7 @@ image-auditor ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.
 
 **Full mode (default)** asks the model for forensic reasoning alongside score, realism flag, and artifact tags. Use this for dry-runs, borderline decisions, and any run where you will read the JSON report before moving files.
 
-**Fast mode** (`--fast`) uses a reduced prompt and schema — score and artifact tags only, no model reasoning. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Works for both `ai` (realism) and `generation` (success) lenses. Expect roughly 10–20% faster per image, with larger gains on verbose models.
+**Fast mode** (`--fast`) uses a reduced prompt and schema — score and artifact tags only, no model reasoning. The report still includes a `reasoning` key (empty string) so the format stays consistent; `meta.fast` is `true`. Works for `ai` (realism), `generation` (success), and `quality` (keeper) lenses. Speed gains depend on the model, image size, and hardware.
 
 **When to use `--fast`:**
 
