@@ -433,7 +433,7 @@ def parse_args():
 
 
 def resolve_default_report_path(input_dir: Path) -> Path:
-    """Default --apply-report path; ponytail: legacy filename fallback for one release minimum."""
+    """Return default --apply-report path; fall back to legacy filename if primary is absent."""
     primary = input_dir / DEFAULT_REPORT_NAME
     if primary.is_file():
         return primary
