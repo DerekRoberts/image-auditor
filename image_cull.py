@@ -438,6 +438,11 @@ def parse_args():
         metavar="PATH",
         help="Apply file moves from a cull report without re-analyzing (default: <input_dir>/cull-report.json)",
     )
+    parser.add_argument(
+        "--force-reapply",
+        action="store_true",
+        help="Re-apply entries already marked applied (default: skip them)",
+    )
     parser.add_argument("--report-path-display", default=None, help="Custom path string to display in the final report message")
     parser.add_argument(
         "--max-dimension",
@@ -645,8 +650,11 @@ def apply_from_report(
     threshold_ai: float | None,
     threshold_quality: float | None,
     threshold_generation: float | None,
+    force_reapply: bool = False,
 ):
     meta, results = load_report(report_path)
+    if meta is None:
+        meta = {}
     thresholds = resolve_apply_thresholds(
         meta,
         threshold=threshold,
@@ -657,10 +665,15 @@ def apply_from_report(
     active = [f"{d}={thresholds[d]:.1f}" for d in SCORED_DIMENSIONS if thresholds.get(d) is not None]
     if active:
         print(f"Apply thresholds: {', '.join(active)}")
-    moved = kept = skipped = 0
+    moved = kept = skipped = already_applied = 0
 
     for entry in results:
         filename = entry["file"]
+        if entry.get("applied") and not force_reapply:
+            print(f"Skipping {filename}: already applied")
+            already_applied += 1
+            continue
+
         reject, reasons = evaluate_entry(entry, thresholds)
         if reject is None:
             print(f"Skipping {filename}: error entry without keep override")
@@ -678,6 +691,8 @@ def apply_from_report(
             try:
                 dest = move_reject(src, filter_dir)
                 print(f"Moved {filename} → {dest.name} ({reason_text})")
+                entry["applied"] = True
+                entry["applied_at"] = datetime.now(timezone.utc).isoformat()
                 moved += 1
             except OSError as e:
                 print(f"Error moving {filename}: {e}")
@@ -686,7 +701,14 @@ def apply_from_report(
             print(f"Preserved {filename} ({reason_text})")
             kept += 1
 
-    print(f"\nApply complete: {moved} moved, {kept} kept, {skipped} skipped.")
+    meta["last_applied_at"] = datetime.now(timezone.utc).isoformat()
+    meta["last_applied_thresholds"] = thresholds
+    write_report(report_path, meta, results)
+
+    parts = [f"{moved} moved", f"{kept} kept", f"{skipped} skipped"]
+    if already_applied:
+        parts.append(f"{already_applied} already applied")
+    print(f"\nApply complete: {', '.join(parts)}.")
 
 
 def scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int] | None:
@@ -1220,6 +1242,25 @@ def _self_check():
         out = captured.getvalue()
         assert "Moved bad.jpg" in out and "realism_score 4.0 < 7.0" in out
         assert not (input_dir / "bad.jpg").exists()
+        meta_after, results_after = load_report(report)
+        assert results_after[0]["applied"] is True and results_after[0]["applied_at"]
+        assert meta_after["last_applied_at"] and meta_after["last_applied_thresholds"]["ai"] == 7.0
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            apply_from_report(
+                report, input_dir, input_dir / "rejects",
+                threshold=None, threshold_ai=None, threshold_quality=None, threshold_generation=None,
+            )
+        assert "already applied" in captured.getvalue()
+        (input_dir / "bad.jpg").write_bytes(b"x")
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            apply_from_report(
+                report, input_dir, input_dir / "rejects",
+                threshold=None, threshold_ai=None, threshold_quality=None, threshold_generation=None,
+                force_reapply=True,
+            )
+        assert "Moved bad.jpg" in captured.getvalue()
     with tempfile.TemporaryDirectory() as tmp:
         import io
         from contextlib import redirect_stdout
@@ -1747,6 +1788,7 @@ def main():
             threshold_ai=args.threshold_ai,
             threshold_quality=args.threshold_quality,
             threshold_generation=args.threshold_generation,
+            force_reapply=args.force_reapply,
         )
         return
 
