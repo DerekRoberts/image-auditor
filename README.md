@@ -53,9 +53,12 @@ After reviewing or hand-editing `cull-report.json` (legacy names `cull_report.js
 image-cull ~/Downloads --apply-report
 image-cull ~/Downloads --apply-report --threshold 7.5
 image-cull ~/Downloads --apply-report --threshold-quality 6.0 --threshold-ai 7.5
+image-cull ~/Downloads --apply-report --force-reapply
 ```
 
 Apply reads cutoffs from `meta.thresholds`; CLI flags override. Rejects when **any populated dimension** with an active threshold fails. Logs the reason per file.
+
+Successful moves set `applied: true` and `applied_at` (ISO UTC) on each result entry and persist the report back to the same path. Re-running `--apply-report` skips entries already marked applied; use `--force-reapply` to process them again (if the source file is already gone, apply logs a warning and skips that entry).
 
 ### Specify custom vision model
 ```bash
@@ -156,6 +159,7 @@ image-cull ~/AI-Art --profile ai-fun --checks hygiene,generation --min-res 512x5
 | `--min-res` | — | Reject images below WIDTHxHEIGHT pixels (e.g. `512x512`); hygiene lens only |
 | `--dry-run` | `False` | Generate report without moving files |
 | `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: first of `cull-report.json`, `cull_report.json`, `realism_audit_report.json` in input dir) |
+| `--force-reapply` | `False` | With `--apply-report`, re-process entries already marked `applied: true` (default: skip them) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
 | `--fast` | `False` | Minimal VLM output (score, flag, artifacts only); skips reasoning for faster bulk triage |
 
@@ -236,7 +240,7 @@ Current runs emit one `analysis` block per file plus legacy `meta.threshold`. Ne
 }
 ```
 
-Each result may include an optional `keep` field (`true` = never move, `false` = always move). Failed entries require `keep` before apply will move them. Legacy bare-array reports are still accepted on read.
+Each result may include an optional `keep` field (`true` = never move, `false` = always move). Failed entries require `keep` before apply will move them. After a successful move, apply sets `applied: true` and `applied_at` (ISO UTC) on that entry. Legacy bare-array reports are still accepted on read.
 
 ### Multi-dimensional layout (`--profile`)
 
@@ -319,6 +323,8 @@ Example with multiple lenses (`mixed` / `ai-fun` / `photos`):
 ```
 
 **Backward compatibility:** reports with top-level `analysis` / `realism_score` still load and apply using `meta.threshold` (or `meta.thresholds.ai`). Multi-dimensional blocks use per-dimension thresholds from `meta.thresholds` (CLI overrides win). Composite apply rejects when **any populated dimension** with an active threshold fails; honors `hygiene.action` and `keep` overrides. Apply logs the reject/preserve reason per file.
+
+**Applied state:** `--apply-report` writes the report back after each run. Moved entries gain `applied: true` and `applied_at`. `meta.last_applied_at` and `meta.last_applied_thresholds` record when apply last ran and which cutoffs were used. Re-apply skips `applied: true` entries unless `--force-reapply` is set.
 
 ---
 
