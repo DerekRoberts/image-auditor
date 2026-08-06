@@ -68,9 +68,9 @@ Profiles select which analysis lenses run and set default thresholds. Without `-
 
 | Profile | Question | Lenses | Status |
 | --- | --- | --- | --- |
-| `mixed` (recommended for unknown folders) | What is this and should I keep it? | `ai` (+ `hygiene`, `quality` when #3 lands) | **AI lens working** |
+| `mixed` (recommended for unknown folders) | What is this and should I keep it? | `hygiene`, `ai` (+ `quality` when #19 lands) | **Hygiene + AI lenses working** |
 | `ai-fun` | Is this render successful / worth keeping? | `generation` (+ optional `hygiene`) | **Generation lens working** |
-| `photos` | Is this a keeper real photo? | `quality` (+ optional `hygiene` when #3 lands) | **Quality lens working** |
+| `photos` | Is this a keeper real photo? | `hygiene`, `quality` | **Hygiene + quality lenses working** |
 
 **Mixed folder (fully working today):**
 ```bash
@@ -129,6 +129,15 @@ Per-dimension threshold overrides (defaults come from the profile):
 image-cull ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 --dry-run
 ```
 
+**Hygiene pre-filter (dupes, corruption, min-res):**
+
+Runs before Ollama on `mixed` and `photos` profiles (or via `--checks hygiene`). Exact duplicates are detected by SHA-256; the first file by sorted name is kept, later copies get `exact_dupe_of`. Corrupt headers, solid-color blanks, and undersized images reject without VLM calls.
+
+```bash
+image-cull ~/Downloads --profile mixed --min-res 512x512 --dry-run
+image-cull ~/AI-Art --profile ai-fun --checks hygiene,generation --min-res 512x512 --dry-run
+```
+
 ---
 
 ## CLI Options
@@ -144,6 +153,7 @@ image-cull ~/Downloads --profile mixed --threshold 7.5 --threshold-quality 6.0 -
 | `--threshold-generation` | — | Override generation success cutoff (1.0 to 10.0) |
 | `--profile` | — | `mixed`, `ai-fun`, or `photos`; omit for legacy single-score mode |
 | `--checks` | — | Comma-separated lenses overriding the profile set (`hygiene`, `ai`, `quality`, `generation`) |
+| `--min-res` | — | Reject images below WIDTHxHEIGHT pixels (e.g. `512x512`); hygiene lens only |
 | `--dry-run` | `False` | Generate report without moving files |
 | `--apply-report` | — | Apply file moves from an existing cull report without re-analyzing (optional path; default: first of `cull-report.json`, `cull_report.json`, `realism_audit_report.json` in input dir) |
 | `--max-dimension` | `0` (off) | Optional: downscale before Ollama so the long edge is at most N px (`0` = send originals; **default**) |
@@ -234,7 +244,7 @@ With `--profile`, each result carries **only the populated dimension blocks** �
 
 | Block | Purpose | Key fields |
 | --- | --- | --- |
-| `hygiene` | Deterministic pre-filter (#2, #3): dupes, corruption, min-res | `action` (`reject` \| `keep`), optional `exact_dupe_of` |
+| `hygiene` | Deterministic pre-filter (#3): exact dupes (SHA-256), corruption, min-res, solid-color blanks | `action` (`reject` \| `keep`), optional `exact_dupe_of`, optional `reason` |
 | `ai` | Photorealism / AI-artifact detection | `realism_score`, `issues[]`, `reasoning` |
 | `quality` | Real-photo keeper scoring (blur, exposure, framing) | `keeper_score`, `issues[]`, `reasoning` |
 | `generation` | AI-art success (subject landed, not melted) | `success_score`, `issues[]`, `reasoning` |
@@ -268,7 +278,7 @@ With `--profile`, each result carries **only the populated dimension blocks** �
 }
 ```
 
-Example with multiple lenses once hygiene/quality/generation ship (`ai-fun` / `photos`):
+Example with multiple lenses (`mixed` / `ai-fun` / `photos`):
 
 ```json
 {
