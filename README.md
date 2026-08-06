@@ -331,6 +331,27 @@ Example with multiple lenses (`mixed` / `ai-fun` / `photos`):
 
 ---
 
+## Self-check & CI
+
+Run the built-in assertion suite (including HEIF round-trip) without culling:
+
+```bash
+pip install -r requirements.txt
+# Linux: system libheif if pillow-heif wheels need it
+python image_cull.py --self-check
+```
+
+Or via the container:
+
+```bash
+docker build -t image-cull .
+docker run --rm image-cull --self-check
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs `--self-check` on the host and inside a fresh image build, plus ruff, shellcheck, and an advisory Trivy fs scan. The `Results` job is the intended single required status check on `main`.
+
+---
+
 ## License
 
 MIT

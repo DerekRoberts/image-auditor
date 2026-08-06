@@ -44,7 +44,7 @@ _ISSUE_TAG = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 class CullConfig:
     """Resolved profile, active lenses, and per-dimension thresholds."""
 
-    __slots__ = ("profile", "lenses", "thresholds", "multi_dimensional")
+    __slots__ = ("lenses", "multi_dimensional", "profile", "thresholds")
 
     def __init__(
         self,
@@ -472,7 +472,15 @@ def parse_args():
         action="store_true",
         help="Minimal VLM output (score, flag, artifacts only) for faster bulk triage",
     )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run built-in assertions (including HEIF) and exit; used by CI",
+    )
     args = parser.parse_args()
+
+    if args.self_check:
+        return args
 
     if args.apply_report is not None and args.dry_run:
         parser.error("--apply-report cannot be used with --dry-run")
@@ -778,7 +786,7 @@ def check_hygiene(
                 return {"action": "reject", "reason": f"below_min_res ({width}x{height})"}
             if _is_solid_color(img):
                 return {"action": "reject", "reason": "solid_color"}
-    except Exception:
+    except Exception:  # noqa: BLE001 — any decode failure ⇒ corrupt
         return {"action": "reject", "reason": "corrupt"}
 
     return {"action": "keep"}
@@ -828,7 +836,7 @@ def ensure_model(model_name: str):
             print(f"Successfully pulled '{model_name}'.")
         else:
             raise SystemExit(f"Error: Ollama returned status {e.status_code} for model '{model_name}': {e}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — connection / non-ResponseError from client
         raise SystemExit(f"Error: Cannot reach Ollama. Is 'ollama serve' running? {e}")
 
 
@@ -911,7 +919,7 @@ def process_image(
             }
             with print_lock:
                 print(f"{tag}  Keeper: {verdict.keeper_score}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — per-image: log and continue batch
         with print_lock:
             traceback.print_exc()
             print(f"{tag}Error processing {img_path.name}: {e}")
@@ -1806,6 +1814,9 @@ def _check_run_cull_progress_tags():
 
 def main():
     args = parse_args()
+    if args.self_check:
+        _self_check()
+        return
 
     input_dir = Path(args.dir)
     if not input_dir.exists() or not input_dir.is_dir():
@@ -1839,5 +1850,4 @@ def main():
 
 
 if __name__ == "__main__":
-    _self_check()
     main()

@@ -1,0 +1,41 @@
+name: Scheduled
+
+on:
+  schedule:
+    - cron: "0 3 * * 6"
+      timezone: America/Los_Angeles
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  stale:
+    name: Stale
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/stale@v11
+        with:
+          days-before-stale: 14
+          days-before-close: 7
+          stale-issue-label: stale
+          stale-pr-label: stale
+          remove-stale-when-updated: true
+          operations-per-run: 100
+          stale-issue-message: >
+            This issue has been marked stale due to no activity for 14 days.
+            It will be closed in 7 days if no action is taken.
+          stale-pr-message: >
+            This PR has been marked stale due to no activity for 14 days.
+            It will be closed in 7 days if no action is taken.
+          close-issue-message: >
+            Closing this issue after 7 days of inactivity since it was marked stale.
+          close-pr-message: >
+            Closing this PR after 7 days of inactivity since it was marked stale.
