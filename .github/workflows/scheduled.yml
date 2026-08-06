@@ -2,7 +2,8 @@ name: Scheduled
 
 on:
   schedule:
-    - cron: "0 11 * * 6" # Saturdays ~3 AM PT
+    - cron: "0 3 * * 6"
+      timezone: America/Los_Angeles
   workflow_dispatch:
 
 concurrency:
@@ -24,7 +25,8 @@ jobs:
         with:
           days-before-stale: 14
           days-before-close: 7
-          stale-label: stale
+          stale-issue-label: stale
+          stale-pr-label: stale
           remove-stale-when-updated: true
           operations-per-run: 100
           stale-issue-message: >
