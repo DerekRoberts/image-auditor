@@ -83,7 +83,7 @@ jobs:
     name: Trivy
     if: (! github.event.pull_request.draft)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       security-events: write
