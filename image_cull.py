@@ -17,7 +17,17 @@ from pathlib import Path
 import ollama
 from pydantic import BaseModel, Field, field_validator
 
-SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
+HEIF_SUFFIXES = frozenset({".heic", ".heif"})
+
+
+def _register_heif_opener() -> None:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+
+
+_register_heif_opener()
 DEFAULT_THRESHOLD = 7.0
 DEFAULT_REPORT_NAME = "cull-report.json"
 LEGACY_REPORT_NAMES = ("cull-report.json", "cull_report.json", "realism_audit_report.json")
@@ -776,24 +786,30 @@ def check_hygiene(
 
 def prepare_analysis_image(img_path: Path, max_dimension: int) -> tuple[Path, Path | None]:
     """Return (path for Ollama, temp file to delete after analysis, or None)."""
-    if max_dimension <= 0:
+    suffix = img_path.suffix.lower()
+    transcode_heif = suffix in HEIF_SUFFIXES
+    if max_dimension <= 0 and not transcode_heif:
         return img_path, None
     from PIL import Image, ImageOps
 
     with Image.open(img_path) as img:
         img = ImageOps.exif_transpose(img)
-        new_size = scaled_dimensions(*img.size, max_dimension)
-        if new_size is None:
+        new_size = scaled_dimensions(*img.size, max_dimension) if max_dimension > 0 else None
+        if new_size is None and not transcode_heif:
             return img_path, None
-        resized = img.resize(new_size, Image.Resampling.LANCZOS)
-        fd, temp_name = tempfile.mkstemp(suffix=img_path.suffix.lower())
+        if new_size is not None:
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        out_suffix = ".jpg" if transcode_heif else suffix
+        fd, temp_name = tempfile.mkstemp(suffix=out_suffix)
         os.close(fd)
         temp_path = Path(temp_name)
         try:
             save_kwargs = {}
-            if img_path.suffix.lower() in (".jpg", ".jpeg"):
+            if out_suffix in (".jpg", ".jpeg"):
                 save_kwargs["quality"] = 95
-            resized.save(temp_path, **save_kwargs)
+            if transcode_heif and img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.save(temp_path, **save_kwargs)
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
@@ -1383,6 +1399,21 @@ def _self_check():
     _check_hygiene_profile_cull()
     _check_quality_score_bounds()
     _check_quality_fast_issue_validation()
+    _check_heif_support()
+
+
+def _check_heif_support():
+    from PIL import Image
+
+    assert HEIF_SUFFIXES <= SUPPORTED_EXTENSIONS
+    reg = Image.registered_extensions()
+    assert reg.get(".heic") == "HEIF" and reg.get(".heif") == "HEIF"
+    # No sample HEIC in repo/CI — round-trip decode needs a fixture; opener registration is the gate.
+    sample = Path(__file__).resolve().parent / "fixtures" / "sample.heic"
+    if sample.is_file():
+        with Image.open(sample) as im:
+            im.load()
+            assert im.size[0] > 0 and im.size[1] > 0
 
 
 def _check_quality_score_bounds():
