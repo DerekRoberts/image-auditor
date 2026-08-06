@@ -13,6 +13,7 @@ Evaluates image quality, detects generation artifacts and defects (e.g. plastic 
 - **Automated Image Sorting:** Preserves quality images in-place and moves filtered files to `--filter-dir`.
 - **Dry-Run Mode:** Generate diagnostic JSON reports without moving any image files.
 - **Containerized CLI:** Pre-packaged wrapper for Podman / Docker to run like a native binary from anywhere on your system.
+- **HEIC / HEIF support:** iPhone and Google Takeout photos (`.heic`, `.heif`) via `pillow-heif`; the container image includes `libheif`.
 
 ---
 
@@ -21,6 +22,8 @@ Evaluates image quality, detects generation artifacts and defects (e.g. plastic 
 ### 1. Prerequisites
 - [Ollama](https://ollama.com) running locally (`ollama serve`).
 - Podman or Docker installed.
+
+Supported input formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.heic`, `.heif`. HEIC decoding uses `pillow-heif` (registered at startup). The Docker image installs `libheif1` for HEIF decode in the container; local runs need `pillow-heif` from `requirements.txt` (and on Linux, system `libheif` if wheels are unavailable).
 
 ### 2. Installation
 Clone the repository and run the setup script:
@@ -147,7 +150,7 @@ image-cull ~/AI-Art --profile ai-fun --checks hygiene,generation --min-res 512x5
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `directory` | `.` | Target input directory containing images (`.png`, `.jpg`, `.jpeg`, `.webp`) |
+| `directory` | `.` | Target input directory containing images (`.png`, `.jpg`, `.jpeg`, `.webp`, `.heic`, `.heif`) |
 | `--filter-dir` | `<input_dir>/rejects` | Directory to move filtered-out/rejected files into |
 | `--model` | `llava` | Local vision model to query via Ollama |
 | `--threshold` | `7.0` (dry-run only) | Minimum score for the profile’s primary lens, or AI realism when no `--profile`; with `--profile`, profile default applies if omitted |
