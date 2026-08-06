@@ -82,7 +82,7 @@ jobs:
   trivy:
     name: Trivy
     if: (! github.event.pull_request.draft)
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -127,7 +127,7 @@ jobs:
     name: Results
     needs: [self-check, docker, lint, trivy]
     if: always() && (! github.event.pull_request.draft)
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
       - name: Log upstream results

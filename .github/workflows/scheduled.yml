@@ -14,7 +14,7 @@ permissions: {}
 jobs:
   stale:
     name: Stale
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       issues: write
