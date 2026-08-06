@@ -1408,12 +1408,24 @@ def _check_heif_support():
     assert HEIF_SUFFIXES <= SUPPORTED_EXTENSIONS
     reg = Image.registered_extensions()
     assert reg.get(".heic") == "HEIF" and reg.get(".heif") == "HEIF"
-    # No sample HEIC in repo/CI — round-trip decode needs a fixture; opener registration is the gate.
-    sample = Path(__file__).resolve().parent / "fixtures" / "sample.heic"
-    if sample.is_file():
-        with Image.open(sample) as im:
+
+    # Deterministic HEIF round-trip (no committed fixture; runs wherever _self_check runs).
+    w, h = 64, 32
+    pixels = bytes(c for y in range(h) for x in range(w) for c in (x * 4, y * 8, (x + y) % 256))
+    with tempfile.TemporaryDirectory() as tmp:
+        heif_path = Path(tmp) / "sample.heic"
+        Image.frombytes("RGB", (w, h), pixels).save(heif_path, format="HEIF")
+        with Image.open(heif_path) as im:
             im.load()
-            assert im.size[0] > 0 and im.size[1] > 0
+            assert im.size == (w, h)
+        send_path, temp_path = prepare_analysis_image(heif_path, 0)
+        assert temp_path is not None and send_path.suffix.lower() == ".jpg"
+        try:
+            with Image.open(send_path) as out:
+                out.load()
+                assert out.size == (w, h)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 def _check_quality_score_bounds():
