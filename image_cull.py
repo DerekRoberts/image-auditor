@@ -569,13 +569,14 @@ def evaluate_entry(entry: dict, thresholds: dict[str, float | None]) -> tuple[bo
         return None, []
 
     hygiene = entry.get("hygiene")
+    hygiene_keep_reason: str | None = None
     if hygiene:
         action = hygiene.get("action")
         reason = _format_hygiene_reason(hygiene)
         if action == "reject":
             return True, [reason]
         if action == "keep":
-            return False, [reason]
+            hygiene_keep_reason = reason
 
     fail_reasons: list[str] = []
     pass_reasons: list[str] = []
@@ -599,6 +600,8 @@ def evaluate_entry(entry: dict, thresholds: dict[str, float | None]) -> tuple[bo
         return True, fail_reasons
     if scored:
         return False, pass_reasons
+    if hygiene_keep_reason is not None:
+        return False, [hygiene_keep_reason]
     return None, []
 
 
@@ -1055,6 +1058,8 @@ def run_cull(args, input_dir: Path, filter_dir: Path):
 
     image_paths = [p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()]
     dupe_map = build_dupe_map(image_paths) if "hygiene" in config.lenses else {}
+    if args.min_res is not None and "hygiene" not in config.lenses:
+        print(f"Warning: --min-res ignored because hygiene lens is not active (lenses: {', '.join(config.lenses)})")
     min_res = args.min_res if "hygiene" in config.lenses else None
     depth = pipeline_depth(len(image_paths))
     print_lock = threading.Lock()
@@ -1115,6 +1120,10 @@ def _self_check():
     assert should_reject({"file": "f.jpg", "status": "error", "error": "boom", "keep": False}, 7.0) is True
     assert should_reject({"file": "g.jpg", "hygiene": {"action": "reject", "exact_dupe_of": "orig.jpg"}}, 7.0) is True
     assert should_reject({"file": "h.jpg", "hygiene": {"action": "keep"}}, 7.0) is False
+    assert should_reject(
+        {"file": "hk.jpg", "hygiene": {"action": "keep"}, "ai": {"realism_score": 5.0, "issues": [], "reasoning": ""}},
+        7.0,
+    ) is True
     assert should_reject(
         {"file": "i.jpg", "ai": {"realism_score": 6.0, "issues": [], "reasoning": ""}},
         7.0,
